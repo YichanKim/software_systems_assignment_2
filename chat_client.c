@@ -127,7 +127,7 @@ int main(int argc, char *argv[])
     int rc = set_socket_addr(&state.server_addr, "127.0.0.1", SERVER_PORT);
 
     if (rc < 0){
-        fprint(stderr, "set socket addr failed\n");
+        fprintf(stderr, "set socket addr failed\n");
         close(sd);
         return 1;
     }

@@ -2,15 +2,49 @@
 #include <stdio.h>
 #include "udp.h"
 #include <pthread.h>
+#include <string.h>
+#include <ctype.h> //for isspace
 
 #define CLIENT_PORT 10000
+#define MAX_NAME_LEN 10
 
 typedef struct{
     int socket_descriptor; //socket descriptor
     struct sockaddr_in server_addr; //sever address
     int running; //running flag
+
+    char client_name[MAX_NAME_LEN];
+    int is_connected; //connected to server flag
 } client_info;
 
+/// @brief Validates if a client request is in proper format
+/// @param request Input processed request wer are trying to validate
+/// @return 1 if format is valid, else 0
+int validate_request_format(const char *request){
+    //Check for $
+    const char *dollar_sign = strchr(request, '$');
+    if (dollar_sign == NULL){
+        fprintf(stderr, "$ Error: missing '$' sign in input\n");
+        return 0;
+    }
+
+    size_t cmd_len = dollar_sign - request;
+
+    if (cmd_len == 0){
+        fprintf(stderr, "Command Error: No command detected\n");
+        return 0;
+    }
+
+    //check for content after $
+    if (*(dollar_sign + 1) == '\0') {
+        fprintf(stderr, "Input Error: No content after $\n");
+        return 0;
+    }
+
+    return 1; //Individual commands are to be validated in server
+}
+
+ 
 void *writer_thread(void *arg)
 {
     //convert arg back to a pointer to client info
@@ -23,34 +57,58 @@ void *writer_thread(void *arg)
     while (state->running && fgets(client_request, sizeof(client_request), stdin) != NULL)
     {
         size_t len = strlen(client_request);
-        if (len > 0 && client_request[len-1] == '\n') {
+        while (len > 0 && client_request[len-1] == '\n') {
             client_request[len-1] = '\0'; //replace '\n'
             len = len -1; //decrement len
         }
 
-        //ignore empty lines
+        char *processed_request = client_request;
+        //get rid of leading whitespace
+        while (len > 0 && isspace((unsigned char) *processed_request)) { //Essentially scrolls through white spcae
+            processed_request++;
+            len = len -1; // decrement len
+        }
+
+        //get rid of trailing whitespace
+        while (len > 0 && isspace((unsigned char) processed_request[len-1])) { //Essentially scrolls through white spcae
+            processed_request[len-1] = '\0';
+            len = len -1; // decrement len
+        }
+        
+         //Empty line error message
         if (len == 0) {
+            fprintf(stderr, "Empty input detected. Please enter input.\n");
             continue;
+        }
+        
+        //if the stdin in client_request buffer is disconn$, set disconnect_flag to 1
+        int disconnect_flag = 0;
+        if (strncmp(processed_request, "disconn$", 8) == 0){
+            disconnect_flag = 1;
+        }
+
+        if (!disconnect_flag) {
+            if (!validate_request_format(processed_request)){
+                //don't send if it is invalid, wait for new stdin
+                continue;
+            }
         }
 
         //return code
         //udp_socket_write(int sd, struct sockaddr_in *addr, char *buffer, int n)
         // rc < 0 is error
-        int rc = udp_socket_write(state->socket_descriptor, &state->server_addr, client_request, len);
+        int rc = udp_socket_write(state->socket_descriptor, &state->server_addr, processed_request, len);
 
         if (rc < 0){
             fprintf(stderr, "udp socket write\n");
             break;
         }
-        
-        //if the stdin in client_request buffer is disconn$, set the running state to 0
-        if(strncmp(client_request, "disconn$", 8) == 0){
+
+        if (disconnect_flag) {
             state->running = 0;
             break;
         }
-        
     }
-
     state->running = 0;
     return NULL;
 }
@@ -85,6 +143,25 @@ void *listener_thread(void *arg)
                 state->running = 0;
                 break;
             }
+
+            //If the first 3 characters from server_response is "Hi ", set is_connected to high and set the name
+            //we MUST make sure that there are no spaces in names AND no commas
+            if (strncmp(server_response, "Hi ", 3) == 0) {
+                const char *start = server_response + 3;
+                const char *end = strchr(start, ',');
+
+                if (end != NULL){
+                     int name_len = end - start;
+                    if (name_len >= MAX_NAME_LEN){
+                        //cut the name to fit the max_name_len
+                        name_len = MAX_NAME_LEN - 1;
+                    }
+
+                    strncpy(state->client_name, start, name_len);
+                    state->client_name[name_len] = '\0';
+                    state->is_connected = 1;
+                }
+            }
         }
         //error case
         else if (rc < 0)
@@ -104,9 +181,9 @@ int main(int argc, char *argv[])
 {
     // This function opens a UDP socket,
     // binding it to all IP interfaces of this machine,
-    // and port number CLIENT_PORT.
+    // and port number ANY FREE PORT CHOSEN BY OS (by passing 0).
     // (See details of the function in udp.h)
-    int sd = udp_socket_open(CLIENT_PORT);
+    int sd = udp_socket_open(0); 
 
     // Variable to store the server's IP address and port
     // (i.e. the server we are trying to contact).
@@ -117,6 +194,8 @@ int main(int argc, char *argv[])
     client_info state;
     state.socket_descriptor = sd;
     state.running = 1;
+    state.is_connected = 0;
+    state.client_name[0] = '\0';
 
 
     // Initializing the server's address.

@@ -15,6 +15,8 @@ typedef struct{
 
     char client_name[MAX_NAME_LEN];
     int is_connected; //connected to server flag
+
+    FILE *chat_write_file; //where we will be storing the output of incoming messages from server
 } client_info;
 
 /// @brief Validates if a client request is in proper format
@@ -137,6 +139,14 @@ void *listener_thread(void *arg)
         if (rc > 0){
             server_response[rc] = '\0';
             
+            // After checking if file has been successfuly opened
+            // Writes server response to file
+            // Flusehes file buffer so that the write to file happens instantly
+            if (state->chat_write_file){
+                fprintf(state->chat_write_file, "%s", server_response);
+                fflush(state->chat_write_file);
+            }
+            
             printf("%s", server_response);
 
             if (strcmp(server_response, "Disconnected. Bye!") == 0) {
@@ -197,6 +207,14 @@ int main(int argc, char *argv[])
     state.is_connected = 0;
     state.client_name[0] = '\0';
 
+    //fopen iChat.txt, which would be the text file that we store incoming messages
+    state.chat_write_file = fopen("iChat.txt", "w"); //we give it write permission only as file will be read with tail command
+
+    if (!state.chat_write_file){ //fopen fail error
+        fprintf(stderr, "fopen error for ichat.txt");
+        close(sd);
+        return 1;
+    }
 
     // Initializing the server's address.
     // We are currently running the server on localhost (127.0.0.1).
@@ -236,6 +254,10 @@ int main(int argc, char *argv[])
     pthread_join(listener_tid, NULL);
 
     close(sd);
+
+    //close ichat.txt
+    fclose(state.chat_write_file);
+
     printf("exiting client");
     return 0;
 }

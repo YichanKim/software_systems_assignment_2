@@ -5,7 +5,9 @@
 #include <pthread.h>
 #include <time.h>
 #include <assert.h>
+#include <unistd.h>
 #include "udp.h"
+
 #define MAX_NAME_LEN 256
 
 // This is a structure representing a single client in our chat system
@@ -28,6 +30,14 @@ typedef struct {
     pthread_rwlock_t lock;
 
 } client_list_t;
+
+// Structure to pass data to worker threads
+// Contains request message, client address, and socket descriptor
+typedef struct {
+    char request[BUFFER_SIZE];
+    struct sockaddr_in client_address;
+    int socket_descriptor;
+} request_handler_t;
 
 //Global client list - shared by all threads
 //This is where we store all the connected clients
@@ -108,6 +118,287 @@ client_node_t *add_client(const char *client_name, struct sockaddr_in *client_ad
 
     printf("Client %s added to the list\n", client_name);
     return new_node;
+}
+
+// Helper function to find a client by name while lock is already held
+client_node_t *find_client_by_name_locked(const char *client_name) {
+    client_node_t *current = client_list.head;
+
+    while (current != NULL) {
+        if (strcmp(current->client_name, client_name) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+// Function to find a client by their chat name
+client_node_t *find_client_by_name(const char *client_name) {
+    // Acquire the read lock
+    pthread_rwlock_rdlock(&client_list.lock);
+
+    // Find the client by name
+    client_node_t *result = find_client_by_name_locked(client_name);
+
+    pthread_rwlock_unlock(&client_list.lock);
+
+    return result;
+}
+
+// Function to find a client by their IP address and port number
+client_node_t *find_client_by_address(struct sockaddr_in *client_address) {
+    pthread_rwlock_rdlock(&client_list.lock);
+
+    client_node_t *current = client_list.head;
+    while (current != NULL) {
+        if (current->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr && current->client_address.sin_port == client_address->sin_port) {
+            pthread_rwlock_unlock(&client_list.lock);
+            return current;
+        }
+        current = current->next;
+    }
+    // Not found - release lock and return NULL
+    pthread_rwlock_unlock(&client_list.lock);
+    return NULL;
+}
+
+// Function to remove a client from the list by their name
+int remove_client_by_name(const char *client_name) {
+    pthread_rwlock_wrlock(&client_list.lock);
+    
+    if (client_list.head != NULL && 
+        strcmp(client_list.head->client_name, client_name) == 0) {
+        // Head node matches - we need to remove it
+        
+        // Save pointer to the node we're about to remove
+        client_node_t *to_remove = client_list.head;
+        
+        // Move head pointer to the next node (or NULL if it was the only node)
+        client_list.head = client_list.head->next;
+        
+        // Now we can safely free the old head node
+        free(to_remove);
+        
+        // Release lock and return success
+        pthread_rwlock_unlock(&client_list.lock);
+        printf("Client '%s' removed from list (was head node)\n", client_name);
+        return 0;
+    }
+
+    client_node_t *current = client_list.head;
+
+    while (current != NULL && current->next != NULL) {
+        // Check if the NEXT node is the one we want to remove
+        if (strcmp(current->next->client_name, client_name) == 0) {
+            
+            client_node_t *to_remove = current->next;
+            
+            current->next = to_remove->next;
+
+            free(to_remove);
+            
+            pthread_rwlock_unlock(&client_list.lock);
+            printf("Client '%s' removed from list\n", client_name);
+            return 0;
+        }
+        
+        // Move to next node
+        current = current->next;
+    }
+    
+    // If we get here, we didn't find the client to remove
+    pthread_rwlock_unlock(&client_list.lock);
+    printf("Client '%s' not found for removal\n", client_name);
+    return -1;  // Not found
+}
+
+// Function to remove a client by their IP address and port
+int remove_client_by_address(struct sockaddr_in *client_address) {
+    pthread_rwlock_wrlock(&client_list.lock);
+    
+    // Check if head node matches
+    if (client_list.head != NULL) {
+        if (client_list.head->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            client_list.head->client_address.sin_port == client_address->sin_port) {
+            // Head node matches - remove it
+            client_node_t *to_remove = client_list.head;
+            client_list.head = client_list.head->next;
+            free(to_remove);
+            pthread_rwlock_unlock(&client_list.lock);
+            return 0;
+        }
+    }
+
+    // Check rest of list (same logic as remove_client_by_name)
+    client_node_t *current = client_list.head;
+    while (current != NULL && current->next != NULL) {
+        if (current->next->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            current->next->client_address.sin_port == client_address->sin_port) {
+            // Found it!
+            client_node_t *to_remove = current->next;
+            current->next = to_remove->next;
+            free(to_remove);
+            pthread_rwlock_unlock(&client_list.lock);
+            return 0;
+        }
+        current = current->next;
+    }
+
+    // Not found
+    pthread_rwlock_unlock(&client_list.lock);
+    return -1;
+}
+
+// Function to update a client's last active time when they send a request
+void update_client_active_time(struct sockaddr_in *client_address) {
+    pthread_rwlock_wrlock(&client_list.lock);
+    client_node_t *current = client_list.head;
+    while (current != NULL) {
+        if (current->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            current->client_address.sin_port == client_address->sin_port) {
+            current->last_active_time = time(NULL);
+            pthread_rwlock_unlock(&client_list.lock);
+            return;
+        }
+        current = current->next;
+    }
+    pthread_rwlock_unlock(&client_list.lock);
+}
+
+// Parse request string into command type and content (format: "command$content")
+int parse_request(const char *request, char *command_type, char *content) {
+    const char *dollar_sign = strchr(request, '$');
+    if (dollar_sign == NULL) {
+        printf("Invalid request format: no '$' delimiter found\n");
+        return -1;
+    }
+    size_t command_len = dollar_sign - request;
+    if (command_len == 0 || command_len >= BUFFER_SIZE) {
+        printf("Invalid request format: command type invalid\n");
+        return -1;
+    }
+    strncpy(command_type, request, command_len);
+    command_type[command_len] = '\0';
+    size_t content_len = strlen(dollar_sign + 1);
+    if (content_len >= BUFFER_SIZE) {
+        printf("Invalid request format: content too long\n");
+        return -1;
+    }
+    strncpy(content, dollar_sign + 1, BUFFER_SIZE - 1);
+    content[BUFFER_SIZE - 1] = '\0';
+    return 0;
+}
+
+// Route parsed request to appropriate handler function based on command type
+void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
+    char command_type[BUFFER_SIZE];
+    char content[BUFFER_SIZE];
+    
+    int parse_rc = parse_request(request, command_type, content);
+    if (parse_rc != 0) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: Invalid request format. Expected 'command$content'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    if (strcmp(command_type, "conn") == 0) {
+        printf("Routing to handle_conn (not implemented yet)\n");
+        char response[BUFFER_SIZE];
+        snprintf(response, BUFFER_SIZE, "conn$ handler not yet implemented\n");
+        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    } else if (strcmp(command_type, "say") == 0) {
+        printf("Routing to handle_say (not implemented yet)\n");
+        char response[BUFFER_SIZE];
+        snprintf(response, BUFFER_SIZE, "say$ handler not yet implemented\n");
+        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    } else if (strcmp(command_type, "sayto") == 0) {
+        printf("Routing to handle_sayto (not implemented yet)\n");
+        char response[BUFFER_SIZE];
+        snprintf(response, BUFFER_SIZE, "sayto$ handler not yet implemented\n");
+        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    } else if (strcmp(command_type, "disconn") == 0) {
+        printf("Routing to handle_disconn (not implemented yet)\n");
+        char response[BUFFER_SIZE];
+        snprintf(response, BUFFER_SIZE, "disconn$ handler not yet implemented\n");
+        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    } else if (strcmp(command_type, "mute") == 0) {
+        printf("Routing to handle_mute (not implemented yet)\n");
+    } else if (strcmp(command_type, "unmute") == 0) {
+        printf("Routing to handle_unmute (not implemented yet)\n");
+    } else if (strcmp(command_type, "rename") == 0) {
+        printf("Routing to handle_rename (not implemented yet)\n");
+        char response[BUFFER_SIZE];
+        snprintf(response, BUFFER_SIZE, "rename$ handler not yet implemented\n");
+        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    } else if (strcmp(command_type, "kick") == 0) {
+        printf("Routing to handle_kick (not implemented yet)\n");
+        char response[BUFFER_SIZE];
+        snprintf(response, BUFFER_SIZE, "kick$ handler not yet implemented\n");
+        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    } else {
+        printf("Unknown command type: '%s'\n", command_type);
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, 
+                 "Error: Unknown command '%s'. Supported: conn, say, sayto, disconn, mute, unmute, rename, kick\n", 
+                 command_type);
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+    }
+}
+
+// Worker thread function that processes a single client request
+void *handle_request(void *arg) {
+    request_handler_t *handler_data = (request_handler_t *)arg;
+    char *request = handler_data->request;
+    struct sockaddr_in client_address = handler_data->client_address;
+    int sd = handler_data->socket_descriptor;
+    
+    printf("Worker thread handling request: %s\n", request);
+    route_request(request, &client_address, sd);
+    free(handler_data);
+    return NULL;
+}
+
+// Listener thread that continuously waits for incoming requests and spawns worker threads
+void *listener_thread(void *arg) {
+    int sd = *(int *)arg;
+    printf("Listener thread started, waiting for requests on port %d...\n", SERVER_PORT);
+    
+    while (1) {
+        char client_request[BUFFER_SIZE];
+        struct sockaddr_in client_address;
+        int rc = udp_socket_read(sd, &client_address, client_request, BUFFER_SIZE);
+        
+        if (rc > 0) {
+            client_request[rc] = '\0';
+            printf("Received request (%d bytes) from client\n", rc);
+            
+            request_handler_t *handler_data = (request_handler_t *)malloc(sizeof(request_handler_t));
+            if (handler_data == NULL) {
+                fprintf(stderr, "Failed to allocate memory for handler data\n");
+                continue;
+            }
+            
+            strncpy(handler_data->request, client_request, BUFFER_SIZE - 1);
+            handler_data->request[BUFFER_SIZE - 1] = '\0';
+            handler_data->client_address = client_address;
+            handler_data->socket_descriptor = sd;
+            
+            pthread_t worker_tid;
+            int thread_rc = pthread_create(&worker_tid, NULL, handle_request, handler_data);
+            if (thread_rc != 0) {
+                fprintf(stderr, "Failed to create worker thread\n");
+                free(handler_data);
+                continue;
+            }
+            
+            pthread_detach(worker_tid);
+        } else if (rc < 0) {
+            fprintf(stderr, "Error reading from socket\n");
+        }
+    }
+    return NULL;
 }
 
 int main(int argc, char *argv[])

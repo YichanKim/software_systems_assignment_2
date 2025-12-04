@@ -311,6 +311,52 @@ int parse_request(const char *request, char *command_type, char *content) {
     return 0;
 }
 
+void handle_conn(const char *content, struct sockaddr_in *client_address, int socket_descriptor){
+    //trim(content);
+    //Assume that content is already trimmed
+    
+    size_t len = strlen(content);
+    
+    if (len == 0 || len >= MAX_NAME_LEN){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: No name or too long of a name. Expected 'conn$ [NAME]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    //Check if name already exists
+    if (find_client_by_name(content) != NULL){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: Name already taken. Please choose another name\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    //Determine if the client is admin
+    int client_port = htons(client_address->sin_port); //undos htons as seen in udp.h. Converts back (network-short-to-host)
+    int is_admin = 0;
+
+    if (client_port == 6666){
+        is_admin = 1;
+    }
+
+    client_node_t *added_client_node = add_client(content, client_address, is_admin);
+
+    if(added_client_node == NULL){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error: Error adding client to client list\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    update_client_active_time(client_address);
+
+    char response[BUFFER_SIZE];
+    snprintf(response, BUFFER_SIZE, "Hi %s, you have successfully connected to the chat\n", content);
+    udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+    return;
+}
+
 // Route parsed request to appropriate handler function based on command type
 void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
     char command_type[BUFFER_SIZE];

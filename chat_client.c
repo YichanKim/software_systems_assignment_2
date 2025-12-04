@@ -8,6 +8,15 @@
 #define CLIENT_PORT 10000
 #define MAX_NAME_LEN 10
 
+
+/**
+ * We may need locks for:
+ *  1. running flag (Both listener and writer threads manipulate variable)
+ *  2. is_connected (written by listener, read by writer)
+ *  3. client_name (written by listener, read by writer)
+ *  4. chat_write_file (written by listener, closed by main)
+ */
+
 typedef struct{
     int socket_descriptor; //socket descriptor
     struct sockaddr_in server_addr; //sever address
@@ -17,6 +26,8 @@ typedef struct{
     int is_connected; //connected to server flag
 
     FILE *chat_write_file; //where we will be storing the output of incoming messages from server
+
+    pthread_mutex_t lock; //Used for locks
 } client_info;
 
 /// @brief Validates if a client request is in proper format
@@ -55,9 +66,23 @@ void *writer_thread(void *arg)
     // Storage for request messages
     char client_request[BUFFER_SIZE];
 
-    //check if state of client is running and on success of writing stdin to client_request buffer
-    while (state->running && fgets(client_request, sizeof(client_request), stdin) != NULL)
-    {
+    //allows constant check of state->running
+    while(1) {
+        pthread_mutex_lock(&state->lock);
+        int running = state->running;
+        pthread_mutex_unlock(&state->lock);
+
+        if (!running){
+            break;
+        }
+
+        if (!(fgets(client_request, sizeof(client_request), stdin) != NULL)){
+            break;
+        }
+
+
+        //Might need implementation of is_connected flag and ask user to connect first when sending an invalid req
+        //check if state of client is running and on success of writing stdin to client_request buffer
         size_t len = strlen(client_request);
         while (len > 0 && client_request[len-1] == '\n') {
             client_request[len-1] = '\0'; //replace '\n'
@@ -77,7 +102,7 @@ void *writer_thread(void *arg)
             len = len -1; // decrement len
         }
         
-         //Empty line error message
+        //Empty line error message
         if (len == 0) {
             fprintf(stderr, "Empty input detected. Please enter input.\n");
             continue;
@@ -107,11 +132,14 @@ void *writer_thread(void *arg)
         }
 
         if (disconnect_flag) {
-            state->running = 0;
             break;
         }
+
     }
+    //If disconnect/socket write error/ safety check
+    pthread_mutex_lock(&state->lock);
     state->running = 0;
+    pthread_mutex_unlock(&state->lock);
     return NULL;
 }
 
@@ -126,8 +154,15 @@ void *listener_thread(void *arg)
     // creates variable to store responder address
     struct sockaddr_in responder_addr;
 
-    //check if state of client is running
-    while (state->running){
+    //allows constant check of state->running
+    while(1) {
+        pthread_mutex_lock(&state->lock);
+        int running = state->running;
+        pthread_mutex_unlock(&state->lock);
+        //check if state of client is running
+        if (!running){
+            break;
+        }
         // This function reads the response from the server
         // through the socket at sd.
         // In our case, responder_addr will simply be
@@ -142,34 +177,40 @@ void *listener_thread(void *arg)
             // After checking if file has been successfuly opened
             // Writes server response to file
             // Flusehes file buffer so that the write to file happens instantly
+            pthread_mutex_lock(&state->lock);
             if (state->chat_write_file){
                 fprintf(state->chat_write_file, "%s", server_response);
                 fflush(state->chat_write_file);
             }
+            pthread_mutex_unlock(&state->lock);
             
             printf("%s", server_response);
 
             if (strcmp(server_response, "Disconnected. Bye!") == 0) {
-                state->running = 0;
                 break;
             }
 
             //If the first 3 characters from server_response is "Hi ", set is_connected to high and set the name
             //we MUST make sure that there are no spaces in names AND no commas
+
+            //REPLACE WITH HANDLE CONN FUNCTION WIP
             if (strncmp(server_response, "Hi ", 3) == 0) {
                 const char *start = server_response + 3;
                 const char *end = strchr(start, ',');
 
                 if (end != NULL){
-                     int name_len = end - start;
+                    int name_len = end - start;
                     if (name_len >= MAX_NAME_LEN){
                         //cut the name to fit the max_name_len
                         name_len = MAX_NAME_LEN - 1;
                     }
 
+                    pthread_mutex_lock(&state->lock);
                     strncpy(state->client_name, start, name_len);
                     state->client_name[name_len] = '\0';
                     state->is_connected = 1;
+                    pthread_mutex_unlock(&state->lock);
+
                 }
             }
         }
@@ -181,10 +222,12 @@ void *listener_thread(void *arg)
         }
     }
     //if break from prev while loop, terminate thread
+    //If disconnect/socket read error/ safety check
+    pthread_mutex_lock(&state->lock);
     state->running = 0;
+    pthread_mutex_unlock(&state->lock);
     return NULL;
 }
-
 
 // client code
 int main(int argc, char *argv[])
@@ -206,6 +249,8 @@ int main(int argc, char *argv[])
     state.running = 1;
     state.is_connected = 0;
     state.client_name[0] = '\0';
+
+    pthread_mutex_init(&state.lock, NULL);
 
     //fopen iChat.txt, which would be the text file that we store incoming messages
     state.chat_write_file = fopen("iChat.txt", "w"); //we give it write permission only as file will be read with tail command
@@ -249,15 +294,19 @@ int main(int argc, char *argv[])
     //wait for writer thread termination
     pthread_join(writer_tid,NULL);
     //on writer thread termination, set running state to 0
+    pthread_mutex_lock(&state.lock);
     state.running = 0;
+    pthread_mutex_unlock(&state.lock);
     //wait for listener thread terimination
     pthread_join(listener_tid, NULL);
 
     close(sd);
-
+    pthread_mutex_lock(&state.lock);
     //close ichat.txt
     fclose(state.chat_write_file);
+    pthread_mutex_unlock(&state.lock);
 
+    pthread_mutex_destroy(&state.lock);
     printf("exiting client");
     return 0;
 }

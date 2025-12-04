@@ -10,6 +10,27 @@
 
 #define MAX_NAME_LEN 256
 
+//Helper function to do trimming
+char* trim(char *str){
+    if (!str){
+        return str;
+    }
+
+    //Move pointer forward if it is just a space
+     while (*str == ' '){
+        str++;
+    }
+
+    char *end = str + strlen(str);
+        while (end > str && *(end - 1) == ' ') {
+            end--;
+        }
+    *end = '\0'; // Null-terminate at the trimmed position
+    
+    return str;
+}
+
+
 // This is a structure representing a single client in our chat system
 // This is a node in our linked list 
 typedef struct client_node { 

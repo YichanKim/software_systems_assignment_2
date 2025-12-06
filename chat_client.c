@@ -199,7 +199,7 @@ void *writer_thread(void *arg)
         
         //if the stdin in client_request buffer is disconn$, set disconnect_flag to 1
         int disconnect_flag = 0;
-        if (strncmp(processed_request, "disconn$") == 0){
+        if (strcmp(processed_request, "disconn$") == 0){
             disconnect_flag = 1;
         }
 

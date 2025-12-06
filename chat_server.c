@@ -357,6 +357,49 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     return;
 }
 
+void handle_say(const char *content, struct sockaddr_in *client_address, int socket_descriptor){
+    size_t len = strlen(content);
+    
+    //invalid message
+    if (len == 0 || len >= MAX_NAME_LEN){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ No message content or too long of a message. Expected 'say$ [MESSAGE]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    client_node_t *sender_address = find_client_by_address(client_address);
+    //We can't find the client in the client list. Therefore, send error to client and ask to connect first
+    if (sender_address == NULL){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ You have not connected to server yet. Please connect to server using 'conn$ [NAME].\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    //message preparation
+    char message[BUFFER_SIZE];
+    snprintf(message, BUFFER_SIZE, "say$ %s: %s\n", sender_address->client_name, content);
+    
+    //send message
+    //broadcast_message(message, client_address, socket_descriptor);
+
+    pthread_rwlock_rdlock(&client_list.lock);
+
+    //logic from find_client_by_address
+    client_node_t *current = client_list.head;
+    while (current != NULL) {
+        //write to all clients
+        udp_socket_write(socket_descriptor, &current->client_address, (char *) message, strlen(message));
+        current = current->next;
+    }
+    pthread_rwlock_unlock(&client_list.lock);
+
+    //housekeeping
+    update_client_active_time(client_address);
+    return;
+}
+
 // Route parsed request to appropriate handler function based on command type
 void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
     char command_type[BUFFER_SIZE];
@@ -380,10 +423,13 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
         fflush(stdout);
         handle_conn(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "say") == 0) {
-        printf("Routing to handle_say (not implemented yet)\n");
-        char response[BUFFER_SIZE];
-        snprintf(response, BUFFER_SIZE, "say$ handler not yet implemented\n");
-        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+        printf("Routing to handle_say\n");
+        fflush(stdout);
+        handle_say(trimmed_content, client_address, socket_descriptor);
+        
+        //char response[BUFFER_SIZE];
+        //snprintf(response, BUFFER_SIZE, "say$ handler not yet implemented\n");
+        //udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else if (strcmp(trimmed_command, "sayto") == 0) {
         printf("Routing to handle_sayto (not implemented yet)\n");
         char response[BUFFER_SIZE];
@@ -451,7 +497,7 @@ void *listener_thread(void *arg) {
                 fprintf(stderr, "Failed to allocate memory for handler data\n");
                 continue;
             }
-            
+
             //use memcpy for cleaner buffer use
             memcpy(handler_data->request, client_request, rc);
             handler_data->request[rc] = '\0';

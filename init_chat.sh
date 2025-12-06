@@ -1,8 +1,8 @@
 # Run 'chmod +x run_chat.sh' initially for setup
 # After that, type './run_chat.sh' for compile + run
 # Note that server must be killed when done
-#pkill -f "chat_server|chat_client" || true
-#sleep 0.5
+pkill -f "chat_server|chat_client" || true
+sleep 0.5
 
 gcc chat_client.c -o chat_client
 

@@ -8,6 +8,8 @@
 #define CLIENT_PORT 10000
 #define MAX_NAME_LEN 10
 
+//Make sure name cannot have '$'
+
 
 /**
  * We may need locks for:
@@ -77,6 +79,7 @@ void route_acknowledge(const char*request, void *arg) {
                 name_len = MAX_NAME_LEN - 1;
             }
 
+            printf("%s", content);
             pthread_mutex_lock(&state->lock);
             strncpy(state->client_name, start, name_len);
             state->client_name[name_len] = '\0';
@@ -84,8 +87,16 @@ void route_acknowledge(const char*request, void *arg) {
             pthread_mutex_unlock(&state->lock);
 
         }
-
-
+    } else if(strcmp(command_type, "say") == 0){
+        pthread_mutex_lock(&state->lock);
+        // After checking if file has been successfuly opened
+        // Writes server response to file
+        // Flusehes file buffer so that the write to file happens instantly    
+        if (state->chat_write_file){
+                fprintf(state->chat_write_file, "%s", content);
+                fflush(state->chat_write_file);
+            }
+        pthread_mutex_unlock(&state->lock);
     } else {
         fprintf(stderr, "Error$ Error from Server. Please make appropriate changes.\n");
         return;
@@ -235,18 +246,9 @@ void *listener_thread(void *arg)
         //rc is the number of bytes retrieved
         if (rc > 0){
             server_response[rc] = '\0';
-            
-            // After checking if file has been successfuly opened
-            // Writes server response to file
-            // Flusehes file buffer so that the write to file happens instantly
-            pthread_mutex_lock(&state->lock);
-            if (state->chat_write_file){
-                fprintf(state->chat_write_file, "%s", server_response);
-                fflush(state->chat_write_file);
-            }
-            pthread_mutex_unlock(&state->lock);
-            
-            printf("%s", server_response);
+
+            //debugging
+            printf("[DEBUG] %s", server_response);
 
             if (strcmp(server_response, "Disconnected. Bye!") == 0) {
                 break;

@@ -493,7 +493,38 @@ void handle_sayto(const char *content, struct sockaddr_in *client_address, int s
     return;
 }
 
-
+void handle_disconn(const char *content, struct sockaddr_in *client_address, int socket_descriptor){
+    size_t len = strlen(content);
+    
+    //invalid command (there should be no content)
+    if (len != 0){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Invalid disconn$ command. Expected 'disconn$'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    client_node_t *sender_address = find_client_by_address(client_address);
+    //We can't find the client in the client list. Send disconnect anyways
+    if (sender_address != NULL){
+        //remove client if found
+        if (remove_client_by_address(client_address) != 0){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Erorr encountered during removal of client from server. Please try again.\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+        }
+    }
+    
+    //message preparation
+    char message[BUFFER_SIZE];
+    snprintf(message, BUFFER_SIZE, "disconn$ Disconnected. Bye!\n");
+    
+    udp_socket_write(socket_descriptor, client_address, (char *) message, strlen(message));
+    
+    //no need to update client_active_time as we no longer have that in client list anymore.
+    return;
+}
 
 // Route parsed request to appropriate handler function based on command type
 void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
@@ -525,10 +556,8 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
         printf("[DEBUG] Routing to handle_sayto\n");
         handle_sayto(trimmed_content, client_address, socket_descriptor); 
     } else if (strcmp(trimmed_command, "disconn") == 0) {
-        printf("[DEBUG] Routing to handle_disconn (not implemented yet)\n");
-        char response[BUFFER_SIZE];
-        snprintf(response, BUFFER_SIZE, "disconn$ handler not yet implemented\n");
-        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+        printf("[DEBUG] Routing to handle_disconn");
+        handle_disconn(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "mute") == 0) {
         printf("[DEBUG] Routing to handle_mute (not implemented yet)\n");
     } else if (strcmp(trimmed_command, "unmute") == 0) {

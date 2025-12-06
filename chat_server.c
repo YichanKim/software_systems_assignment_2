@@ -75,7 +75,7 @@ void init_client_list() {
         fprintf(stderr, "Failed to initialize reader-writer lock\n");
         exit(1);
     }
-    printf("Client list initialized\n");
+    printf("[DEBUG] Client list initialized\n");
 }
 
 // Function to clean up the client list (Called on server shutdown)
@@ -99,7 +99,7 @@ void destroy_client_list() {
     // Destroy the lock itself
     pthread_rwlock_destroy(&client_list.lock);
 
-    printf("Client list destroyed\n");
+    printf("[DEBUG] Client list destroyed\n");
 }
 
 // Function to add a new client to the list
@@ -137,7 +137,7 @@ client_node_t *add_client(const char *client_name, struct sockaddr_in *client_ad
 
     pthread_rwlock_unlock(&client_list.lock);
 
-    printf("Client %s added to the list\n", client_name);
+    printf("[DEBUG] Client %s added to the list\n", client_name);
     return new_node;
 }
 
@@ -203,7 +203,7 @@ int remove_client_by_name(const char *client_name) {
         
         // Release lock and return success
         pthread_rwlock_unlock(&client_list.lock);
-        printf("Client '%s' removed from list (was head node)\n", client_name);
+        printf("[DEBUG] Client '%s' removed from list (was head node)\n", client_name);
         return 0;
     }
 
@@ -220,7 +220,7 @@ int remove_client_by_name(const char *client_name) {
             free(to_remove);
             
             pthread_rwlock_unlock(&client_list.lock);
-            printf("Client '%s' removed from list\n", client_name);
+            printf("[DEBUG] Client '%s' removed from list\n", client_name);
             return 0;
         }
         
@@ -230,7 +230,7 @@ int remove_client_by_name(const char *client_name) {
     
     // If we get here, we didn't find the client to remove
     pthread_rwlock_unlock(&client_list.lock);
-    printf("Client '%s' not found for removal\n", client_name);
+    printf("[DEBUG] Client '%s' not found for removal\n", client_name);
     return -1;  // Not found
 }
 
@@ -291,19 +291,19 @@ void update_client_active_time(struct sockaddr_in *client_address) {
 int parse_request(const char *request, char *command_type, char *content) {
     const char *dollar_sign = strchr(request, '$');
     if (dollar_sign == NULL) {
-        printf("Invalid request format: no '$' delimiter found\n");
+        printf("[DEBUG] Invalid request format: no '$' delimiter found\n");
         return -1;
     }
     size_t command_len = dollar_sign - request;
     if (command_len == 0 || command_len >= BUFFER_SIZE) {
-        printf("Invalid request format: command type invalid\n");
+        printf("[DEBUG] Invalid request format: command type invalid\n");
         return -1;
     }
     strncpy(command_type, request, command_len);
     command_type[command_len] = '\0';
     size_t content_len = strlen(dollar_sign + 1);
     if (content_len >= BUFFER_SIZE) {
-        printf("Invalid request format: content too long\n");
+        printf("[DEBUG] Invalid request format: content too long\n");
         return -1;
     }
     strncpy(content, dollar_sign + 1, BUFFER_SIZE - 1);
@@ -419,11 +419,11 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
     char *trimmed_content = trim(content);
     
     if (strcmp(trimmed_command, "conn") == 0) {
-        printf("Routing to handle_conn\n");
+        printf("[DEBUG] Routing to handle_conn\n");
         fflush(stdout);
         handle_conn(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "say") == 0) {
-        printf("Routing to handle_say\n");
+        printf("[DEBUG] Routing to handle_say\n");
         fflush(stdout);
         handle_say(trimmed_content, client_address, socket_descriptor);
         
@@ -431,31 +431,31 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
         //snprintf(response, BUFFER_SIZE, "say$ handler not yet implemented\n");
         //udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else if (strcmp(trimmed_command, "sayto") == 0) {
-        printf("Routing to handle_sayto (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_sayto (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "sayto$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else if (strcmp(trimmed_command, "disconn") == 0) {
-        printf("Routing to handle_disconn (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_disconn (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "disconn$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else if (strcmp(trimmed_command, "mute") == 0) {
-        printf("Routing to handle_mute (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_mute (not implemented yet)\n");
     } else if (strcmp(trimmed_command, "unmute") == 0) {
-        printf("Routing to handle_unmute (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_unmute (not implemented yet)\n");
     } else if (strcmp(trimmed_command, "rename") == 0) {
-        printf("Routing to handle_rename (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_rename (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "rename$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else if (strcmp(trimmed_command, "kick") == 0) {
-        printf("Routing to handle_kick (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_kick (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "kick$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else {
-        printf("Unknown command type: '%s'\n", trimmed_command);
+        printf("[DEBUG] Unknown command type: '%s'\n", trimmed_command);
         char error_msg[BUFFER_SIZE];
         snprintf(error_msg, BUFFER_SIZE, 
                  "Error$ Unknown command '%s'. Supported: conn, say, sayto, disconn, mute, unmute, rename, kick\n", trimmed_command);
@@ -470,7 +470,7 @@ void *handle_request(void *arg) {
     struct sockaddr_in client_address = handler_data->client_address;
     int sd = handler_data->socket_descriptor;
     
-    printf("Worker thread handling request: %s\n", request);
+    printf("[DEBUG] Worker thread handling request: %s\n", request);
     route_request(request, &client_address, sd);
     free(handler_data);
     return NULL;
@@ -479,7 +479,7 @@ void *handle_request(void *arg) {
 // Listener thread that continuously waits for incoming requests and spawns worker threads
 void *listener_thread(void *arg) {
     int sd = *(int *)arg;
-    printf("Listener thread started, waiting for requests on port %d...\n", SERVER_PORT);
+    printf("[DEBUG] Listener thread started, waiting for requests on port %d...\n", SERVER_PORT);
     fflush(stdout);
     
     while (1) {
@@ -489,7 +489,7 @@ void *listener_thread(void *arg) {
         
         if (rc > 0) {
             client_request[rc] = '\0';
-            printf("Received request (%d bytes) from client\n", rc);
+            printf("[DEBUG] Received request (%d bytes) from client\n", rc);
             fflush(stdout);
 
             request_handler_t *handler_data = (request_handler_t *)malloc(sizeof(request_handler_t));
@@ -535,7 +535,7 @@ int main(int argc, char *argv[])
     init_client_list();
 
     // Demo code (remove later)
-    printf("Server is listening on port %d\n", SERVER_PORT);
+    printf("[DEBUG] Server is listening on port %d\n", SERVER_PORT);
 
     //listener thread init
     pthread_t listener_tid;

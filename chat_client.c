@@ -107,6 +107,12 @@ void route_acknowledge(const char*request, void *arg) {
                 fflush(state->chat_write_file);
             }
         pthread_mutex_unlock(&state->lock);
+    } else if (strcmp(command_type, "disconn") == 0) {
+        printf("%s\n", content);
+        pthread_mutex_lock(&state->lock);
+        state->running = 0;
+        pthread_mutex_unlock(&state->lock);
+        //break;
     } else {
         fprintf(stderr, "Error$ Error from Server. Please make appropriate changes.\n");
         return;
@@ -193,7 +199,7 @@ void *writer_thread(void *arg)
         
         //if the stdin in client_request buffer is disconn$, set disconnect_flag to 1
         int disconnect_flag = 0;
-        if (strncmp(processed_request, "disconn$", 8) == 0){
+        if (strncmp(processed_request, "disconn$") == 0){
             disconnect_flag = 1;
         }
 
@@ -215,6 +221,9 @@ void *writer_thread(void *arg)
         }
 
         if (disconnect_flag) {
+            pthread_mutex_lock(&state->lock);
+            state->running = 0;
+            pthread_mutex_unlock(&state->lock);
             break;
         }
 
@@ -259,10 +268,6 @@ void *listener_thread(void *arg)
 
             //debugging
             printf("[DEBUG] %s", server_response);
-
-            if (strcmp(server_response, "Disconnected. Bye!") == 0) {
-                break;
-            }
 
             //If the first 3 characters from server_response is "Hi ", set is_connected to high and set the name
             //we MUST make sure that there are no spaces in names AND no commas
@@ -321,7 +326,7 @@ int main(int argc, char *argv[])
     }
 
     //debugging
-    printf("[DEBUG] run tail -f %s", chat_file_name);
+    printf("[DEBUG] tail -f %s\n", chat_file_name);
 
     //fopen iChat.txt, which would be the text file that we store incoming messages
     state.chat_write_file = fopen(chat_file_name, "w"); //we give it write permission only as file will be read with tail command
@@ -378,6 +383,6 @@ int main(int argc, char *argv[])
     pthread_mutex_unlock(&state.lock);
 
     pthread_mutex_destroy(&state.lock);
-    printf("exiting client");
+    printf("[DEBUG] exiting client\n");
     return 0;
 }

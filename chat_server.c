@@ -313,13 +313,13 @@ int parse_request(const char *request, char *command_type, char *content) {
 
 void handle_conn(const char *content, struct sockaddr_in *client_address, int socket_descriptor){
     //trim(content);
-    //Assume that content is already trimmed
+    //Assume that content is already trimmed -> could be done in the route request function
     
     size_t len = strlen(content);
     
     if (len == 0 || len >= MAX_NAME_LEN){
         char error_msg[BUFFER_SIZE];
-        snprintf(error_msg, BUFFER_SIZE, "Error: No name or too long of a name. Expected 'conn$ [NAME]'\n");
+        snprintf(error_msg, BUFFER_SIZE, "Error$ No name or too long of a name. Expected 'conn$ [NAME]'\n");
         udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
         return;
     }
@@ -327,7 +327,7 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     //Check if name already exists
     if (find_client_by_name(content) != NULL){
         char error_msg[BUFFER_SIZE];
-        snprintf(error_msg, BUFFER_SIZE, "Error: Name already taken. Please choose another name\n");
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Name already taken. Please choose another name\n");
         udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
         return;
     }
@@ -344,7 +344,7 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
 
     if(added_client_node == NULL){
         char error_msg[BUFFER_SIZE];
-        snprintf(error_msg, BUFFER_SIZE, "Error: Error adding client to client list\n");
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Error adding client to client list\n");
         udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
         return;
     }
@@ -352,7 +352,7 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     update_client_active_time(client_address);
 
     char response[BUFFER_SIZE];
-    snprintf(response, BUFFER_SIZE, "Hi %s, you have successfully connected to the chat\n", content);
+    snprintf(response, BUFFER_SIZE, "conn$ Hi %s, you have successfully connected to the chat\n", content);
     udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     return;
 }
@@ -363,53 +363,56 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
     char content[BUFFER_SIZE];
     
     int parse_rc = parse_request(request, command_type, content);
+
     if (parse_rc != 0) {
         char error_msg[BUFFER_SIZE];
-        snprintf(error_msg, BUFFER_SIZE, "Error: Invalid request format. Expected 'command$content'\n");
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Invalid request format. Expected 'command$content'\n");
         udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
         return;
     }
     
-    if (strcmp(command_type, "conn") == 0) {
-        printf("Routing to handle_conn (not implemented yet)\n");
-        char response[BUFFER_SIZE];
-        snprintf(response, BUFFER_SIZE, "conn$ handler not yet implemented\n");
-        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
-    } else if (strcmp(command_type, "say") == 0) {
+    // Trim command type and content
+    char *trimmed_command = trim(command_type);
+    char *trimmed_content = trim(content);
+    
+    if (strcmp(trimmed_command, "conn") == 0) {
+        printf("Routing to handle_conn\n");
+        fflush(stdout);
+        handle_conn(trimmed_content, client_address, socket_descriptor);
+    } else if (strcmp(trimmed_command, "say") == 0) {
         printf("Routing to handle_say (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "say$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
-    } else if (strcmp(command_type, "sayto") == 0) {
+    } else if (strcmp(trimmed_command, "sayto") == 0) {
         printf("Routing to handle_sayto (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "sayto$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
-    } else if (strcmp(command_type, "disconn") == 0) {
+    } else if (strcmp(trimmed_command, "disconn") == 0) {
         printf("Routing to handle_disconn (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "disconn$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
-    } else if (strcmp(command_type, "mute") == 0) {
+    } else if (strcmp(trimmed_command, "mute") == 0) {
         printf("Routing to handle_mute (not implemented yet)\n");
-    } else if (strcmp(command_type, "unmute") == 0) {
+    } else if (strcmp(trimmed_command, "unmute") == 0) {
         printf("Routing to handle_unmute (not implemented yet)\n");
-    } else if (strcmp(command_type, "rename") == 0) {
+    } else if (strcmp(trimmed_command, "rename") == 0) {
         printf("Routing to handle_rename (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "rename$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
-    } else if (strcmp(command_type, "kick") == 0) {
+    } else if (strcmp(trimmed_command, "kick") == 0) {
         printf("Routing to handle_kick (not implemented yet)\n");
         char response[BUFFER_SIZE];
         snprintf(response, BUFFER_SIZE, "kick$ handler not yet implemented\n");
         udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     } else {
-        printf("Unknown command type: '%s'\n", command_type);
+        printf("Unknown command type: '%s'\n", trimmed_command);
         char error_msg[BUFFER_SIZE];
         snprintf(error_msg, BUFFER_SIZE, 
-                 "Error: Unknown command '%s'. Supported: conn, say, sayto, disconn, mute, unmute, rename, kick\n", 
-                 command_type);
+                 "Error$ Unknown command '%s'. Supported: conn, say, sayto, disconn, mute, unmute, rename, kick\n", trimmed_command);
         udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
     }
 }
@@ -431,24 +434,27 @@ void *handle_request(void *arg) {
 void *listener_thread(void *arg) {
     int sd = *(int *)arg;
     printf("Listener thread started, waiting for requests on port %d...\n", SERVER_PORT);
+    fflush(stdout);
     
     while (1) {
         char client_request[BUFFER_SIZE];
         struct sockaddr_in client_address;
-        int rc = udp_socket_read(sd, &client_address, client_request, BUFFER_SIZE);
+        int rc = udp_socket_read(sd, &client_address, client_request, BUFFER_SIZE-1);
         
         if (rc > 0) {
             client_request[rc] = '\0';
             printf("Received request (%d bytes) from client\n", rc);
-            
+            fflush(stdout);
+
             request_handler_t *handler_data = (request_handler_t *)malloc(sizeof(request_handler_t));
             if (handler_data == NULL) {
                 fprintf(stderr, "Failed to allocate memory for handler data\n");
                 continue;
             }
             
-            strncpy(handler_data->request, client_request, BUFFER_SIZE - 1);
-            handler_data->request[BUFFER_SIZE - 1] = '\0';
+            //use memcpy for cleaner buffer use
+            memcpy(handler_data->request, client_request, rc);
+            handler_data->request[rc] = '\0';
             handler_data->client_address = client_address;
             handler_data->socket_descriptor = sd;
             
@@ -479,41 +485,30 @@ int main(int argc, char *argv[])
 
     assert(sd > -1);
 
-    // Server main loop
-    while (1) 
-    {
-        // Storage for request and response messages
-        char client_request[BUFFER_SIZE], server_response[BUFFER_SIZE];
+    //client list init
+    init_client_list();
 
-        // Demo code (remove later)
-        printf("Server is listening on port %d\n", SERVER_PORT);
+    // Demo code (remove later)
+    printf("Server is listening on port %d\n", SERVER_PORT);
 
-        // Variable to store incoming client's IP address and port
-        struct sockaddr_in client_address;
-    
-        // This function reads incoming client request from
-        // the socket at sd.
-        // (See details of the function in udp.h)
-        int rc = udp_socket_read(sd, &client_address, client_request, BUFFER_SIZE);
+    //listener thread init
+    pthread_t listener_tid;
+    //return 0 on success
+    int listener_thread_rc = pthread_create(&listener_tid, NULL, listener_thread, &sd);
 
-        // Successfully received an incoming request
-        if (rc > 0)
-        {
-            // Demo code (remove later)
-            strcpy(server_response, "Hi, the server has received: ");
-            strcat(server_response, client_request);
-            strcat(server_response, "\n");
-
-            // This function writes back to the incoming client,
-            // whose address is now available in client_address, 
-            // through the socket at sd.
-            // (See details of the function in udp.h)
-            rc = udp_socket_write(sd, &client_address, server_response, BUFFER_SIZE);
-
-            // Demo code (remove later)
-            printf("Request served...\n");
-        }
+    if (listener_thread_rc != 0) {
+        fprintf(stderr, "Error$ listener thread creation error\n");
+        close(sd);
+        destroy_client_list();
+        return 1;
     }
+
+    //keep listener thread alive
+    pthread_join(listener_tid, NULL);
+
+    //cleanup
+    close(sd);
+    destroy_client_list();
 
     return 0;
 }

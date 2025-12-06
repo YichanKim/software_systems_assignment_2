@@ -87,6 +87,16 @@ void route_acknowledge(const char*request, void *arg) {
             pthread_mutex_unlock(&state->lock);
 
         }
+    } else if (strcmp(command_type, "sayto") == 0){
+        pthread_mutex_lock(&state->lock);
+        // After checking if file has been successfuly opened
+        // Writes server response to file
+        // Flusehes file buffer so that the write to file happens instantly    
+        if (state->chat_write_file){
+                fprintf(state->chat_write_file, "%s", content);
+                fflush(state->chat_write_file);
+            }
+        pthread_mutex_unlock(&state->lock);
     } else if(strcmp(command_type, "say") == 0){
         pthread_mutex_lock(&state->lock);
         // After checking if file has been successfuly opened
@@ -298,8 +308,23 @@ int main(int argc, char *argv[])
 
     pthread_mutex_init(&state.lock, NULL);
 
+    char chat_file_name[100];
+    int pid = getpid();
+
+    //append file name to chat_file_name and return the character count
+    int n = snprintf(chat_file_name, sizeof(chat_file_name), "iChat_%d.txt", pid);
+
+    if (n < 0 || n >= sizeof(chat_file_name)) {
+        fprintf(stderr, "[DEBUG] Error creating filename for PID %d\n", pid);
+        close(sd);
+        return 1;
+    }
+
+    //debugging
+    printf("[DEBUG] run tail -f %s", chat_file_name);
+
     //fopen iChat.txt, which would be the text file that we store incoming messages
-    state.chat_write_file = fopen("iChat.txt", "w"); //we give it write permission only as file will be read with tail command
+    state.chat_write_file = fopen(chat_file_name, "w"); //we give it write permission only as file will be read with tail command
 
     if (!state.chat_write_file){ //fopen fail error
         fprintf(stderr, "fopen error for ichat.txt");

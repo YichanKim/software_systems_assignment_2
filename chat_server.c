@@ -486,7 +486,8 @@ void handle_sayto(const char *content, struct sockaddr_in *client_address, int s
     snprintf(message, BUFFER_SIZE, "sayto$ %s: %s\n", sender_address->client_name, message_content);
     
     udp_socket_write(socket_descriptor, &recipient_address->client_address, (char *) message, strlen(message));
-    //WARNING: THIS DOES NOT SEND IT TO THE SENDER BUT ONLY THE RECIPIENT
+    //WARNING: THE BELOW LINES ALSO SENDS MESSAGE TO SENDER
+    udp_socket_write(socket_descriptor, client_address, (char *) message, strlen(message));
 
     //housekeeping
     update_client_active_time(client_address);

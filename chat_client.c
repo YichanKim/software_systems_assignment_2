@@ -30,6 +30,68 @@ typedef struct{
     pthread_mutex_t lock; //Used for locks
 } client_info;
 
+// Parse request string into command type and content (format: "command$content")
+int parse_acknowledge(const char *request, char *command_type, char *content) {
+    const char *dollar_sign = strchr(request, '$');
+    if (dollar_sign == NULL) {
+        printf("Invalid acknowledge format: no '$' delimiter found\n");
+        return -1;
+    }
+    size_t command_len = dollar_sign - request;
+    if (command_len == 0 || command_len >= BUFFER_SIZE) {
+        printf("Invalid acknowledge format: command type invalid\n");
+        return -1;
+    }
+    strncpy(command_type, request, command_len);
+    command_type[command_len] = '\0';
+    size_t content_len = strlen(dollar_sign + 1);
+    if (content_len >= BUFFER_SIZE) {
+        printf("Invalid acknowledge format: content too long\n");
+        return -1;
+    }
+    strncpy(content, dollar_sign + 1, BUFFER_SIZE - 1);
+    content[BUFFER_SIZE - 1] = '\0';
+    return 0;
+}
+
+void route_acknowledge(const char*request, void *arg) {
+    client_info *state = (client_info *)arg;
+    char command_type[BUFFER_SIZE];
+    char content[BUFFER_SIZE];
+
+    int parse_rc = parse_acknowledge(request, command_type, content);
+
+    if(parse_rc != 0) {
+        fprintf(stderr, "Error$ Invalid acknowledge format. Expected 'command$content' from server\n");
+        return;
+    }
+
+    if(strcmp(command_type, "conn") == 0) {
+        const char *start = content + 3;
+        const char *end = strchr(start, ',');
+
+        if (end != NULL && end > start){
+            int name_len = end - start;
+            if (name_len >= MAX_NAME_LEN){
+                //cut the name to fit the max name len
+                name_len = MAX_NAME_LEN - 1;
+            }
+
+            pthread_mutex_lock(&state->lock);
+            strncpy(state->client_name, start, name_len);
+            state->client_name[name_len] = '\0';
+            state->is_connected = 1;
+            pthread_mutex_unlock(&state->lock);
+
+        }
+
+
+    } else {
+        fprintf(stderr, "Error$ Error from Server. Please make appropriate changes.\n");
+        return;
+    }
+}
+
 /// @brief Validates if a client request is in proper format
 /// @param request Input processed request wer are trying to validate
 /// @return 1 if format is valid, else 0
@@ -37,20 +99,20 @@ int validate_request_format(const char *request){
     //Check for $
     const char *dollar_sign = strchr(request, '$');
     if (dollar_sign == NULL){
-        fprintf(stderr, "$ Error: missing '$' sign in input\n");
+        fprintf(stderr, "$ Error$ missing '$' sign in input\n");
         return 0;
     }
 
     size_t cmd_len = dollar_sign - request;
 
     if (cmd_len == 0){
-        fprintf(stderr, "Command Error: No command detected\n");
+        fprintf(stderr, "Command Error$ No command detected\n");
         return 0;
     }
 
     //check for content after $
     if (*(dollar_sign + 1) == '\0') {
-        fprintf(stderr, "Input Error: No content after $\n");
+        fprintf(stderr, "Input Error$ No content after $\n");
         return 0;
     }
 
@@ -194,25 +256,7 @@ void *listener_thread(void *arg)
             //we MUST make sure that there are no spaces in names AND no commas
 
             //REPLACE WITH HANDLE CONN FUNCTION WIP
-            if (strncmp(server_response, "Hi ", 3) == 0) {
-                const char *start = server_response + 3;
-                const char *end = strchr(start, ',');
-
-                if (end != NULL){
-                    int name_len = end - start;
-                    if (name_len >= MAX_NAME_LEN){
-                        //cut the name to fit the max_name_len
-                        name_len = MAX_NAME_LEN - 1;
-                    }
-
-                    pthread_mutex_lock(&state->lock);
-                    strncpy(state->client_name, start, name_len);
-                    state->client_name[name_len] = '\0';
-                    state->is_connected = 1;
-                    pthread_mutex_unlock(&state->lock);
-
-                }
-            }
+            route_acknowledge(server_response, arg);
         }
         //error case
         else if (rc < 0)

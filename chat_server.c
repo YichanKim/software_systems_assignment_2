@@ -400,6 +400,101 @@ void handle_say(const char *content, struct sockaddr_in *client_address, int soc
     return;
 }
 
+//parses message content to find recipient and message content (space seperated)
+//returns 0 on sucess, 1 on fail
+//very similar (practically the same) to parsing for command type with $
+int parse_sayto(const char *content, char* recipient_name, char *message_content){
+    const char *space = strchr(content, ' ');
+    if (space == NULL){
+        printf("[DEBUG] Invalid sayto message format: no space delimiter found\n");
+        return 1;
+    }
+    
+    size_t name_len = space - content;
+    if (name_len == 0 || name_len >= MAX_NAME_LEN) {
+        printf("[DEBUG] Invalid request format: recipient name invalid\n");
+        return 1;
+    }
+
+    strncpy(recipient_name, content, name_len);
+    recipient_name[name_len] = '\0';
+    size_t content_len = strlen(space + 1);
+    if (content_len >= BUFFER_SIZE) {
+        printf("[DEBUG] Invalid request format: message content too long\n");
+        return 1;
+    }
+    
+    strncpy(message_content, space + 1, BUFFER_SIZE - 1);
+    message_content[BUFFER_SIZE - 1] = '\0';
+    
+    // Trim both recipient name and message content
+    char *trimmed_name = trim(recipient_name);
+    char *trimmed_msg = trim(message_content);
+    
+    strncpy(recipient_name, trimmed_name, MAX_NAME_LEN - 1);
+    recipient_name[MAX_NAME_LEN - 1] = '\0';
+    strncpy(message_content, trimmed_msg, BUFFER_SIZE - 1);
+    message_content[BUFFER_SIZE - 1] = '\0';
+    
+    return 0;
+}
+
+void handle_sayto(const char *content, struct sockaddr_in *client_address, int socket_descriptor){
+    size_t len = strlen(content);
+    
+    //invalid message
+    if (len == 0 || len >= BUFFER_SIZE){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ No message content or too long of a message. Expected 'sayto$ [RECIPEINT NAME] [MESSAGE]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    client_node_t *sender_address = find_client_by_address(client_address);
+    //We can't find the client in the client list. Therefore, send error to client and ask to connect first
+    if (sender_address == NULL){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ You have not connected to server yet. Please connect to server using 'conn$ [NAME].\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    //parsing to find recipeient name and message content here
+    char recipient_name[MAX_NAME_LEN];
+    char message_content[BUFFER_SIZE];
+
+    int parse_rc = parse_sayto(content, recipient_name, message_content);
+    if (parse_rc != 0) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Expected 'sayto$ [RECIPIENTNAME] [MESSAGE]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    client_node_t *recipient_address = find_client_by_name(recipient_name);
+
+    //checks if recipient is valid and is in the client_list. If not, retrun error
+    if (recipient_address == NULL){
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Recipient not found, Please double check recipient name. Format: 'sayto$ [NAME] [MSG]'.\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    //message preparation
+    char message[BUFFER_SIZE];
+    snprintf(message, BUFFER_SIZE, "sayto$ %s: %s\n", sender_address->client_name, message_content);
+    
+    udp_socket_write(socket_descriptor, &recipient_address->client_address, (char *) message, strlen(message));
+    //WARNING: THIS DOES NOT SEND IT TO THE SENDER BUT ONLY THE RECIPIENT
+
+    //housekeeping
+    update_client_active_time(client_address);
+    return;
+}
+
+
+
 // Route parsed request to appropriate handler function based on command type
 void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
     char command_type[BUFFER_SIZE];
@@ -425,16 +520,10 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
     } else if (strcmp(trimmed_command, "say") == 0) {
         printf("[DEBUG] Routing to handle_say\n");
         fflush(stdout);
-        handle_say(trimmed_content, client_address, socket_descriptor);
-        
-        //char response[BUFFER_SIZE];
-        //snprintf(response, BUFFER_SIZE, "say$ handler not yet implemented\n");
-        //udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+        handle_say(trimmed_content, client_address, socket_descriptor);        
     } else if (strcmp(trimmed_command, "sayto") == 0) {
-        printf("[DEBUG] Routing to handle_sayto (not implemented yet)\n");
-        char response[BUFFER_SIZE];
-        snprintf(response, BUFFER_SIZE, "sayto$ handler not yet implemented\n");
-        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+        printf("[DEBUG] Routing to handle_sayto\n");
+        handle_sayto(trimmed_content, client_address, socket_descriptor); 
     } else if (strcmp(trimmed_command, "disconn") == 0) {
         printf("[DEBUG] Routing to handle_disconn (not implemented yet)\n");
         char response[BUFFER_SIZE];

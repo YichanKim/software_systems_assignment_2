@@ -60,9 +60,20 @@ typedef struct {
     int socket_descriptor;
 } request_handler_t;
 
+typedef struct{
+    char messages_history [15] [BUFFER_SIZE];
+    int current_index_pointer;
+    int message_count;
+    pthread_mutex_t lock;
+} chat_history_t;
+
 //Global client list - shared by all threads
 //This is where we store all the connected clients
 client_list_t client_list; 
+
+//Global chat history list - shared by all threads
+//This is where we store all the chat history
+chat_history_t chat_history;
 
 //Initialize the client list
 void init_client_list() {
@@ -76,6 +87,15 @@ void init_client_list() {
         exit(1);
     }
     printf("[DEBUG] Client list initialized\n");
+}
+
+void init_chat_history() {
+    chat_history.current_index_pointer = 0;
+    chat_history.message_count = 0;
+    //empties chat history
+    memset(chat_history.messages_history, 0, sizeof(chat_history.messages_history));
+    //initialise the lock
+    pthread_mutex_init(&chat_history.lock, NULL);
 }
 
 // Function to clean up the client list (Called on server shutdown)
@@ -287,6 +307,48 @@ void update_client_active_time(struct sockaddr_in *client_address) {
     pthread_rwlock_unlock(&client_list.lock);
 }
 
+void add_to_history(const char *message) {
+    
+    //we assume that message is less than the buffer size.
+    pthread_mutex_lock(&chat_history.lock);
+    
+    strcpy(chat_history.messages_history[chat_history.current_index_pointer], message);
+    chat_history.current_index_pointer = (chat_history.current_index_pointer+1) % 15;
+    
+    if (chat_history.message_count < 15){
+        chat_history.message_count += 1;
+    }
+    pthread_mutex_unlock(&chat_history.lock);
+}
+
+int get_history(char output_buffer[15][BUFFER_SIZE]){
+    pthread_mutex_lock(&chat_history.lock);
+
+    int count = chat_history.message_count;
+
+    if (count == 0){
+        pthread_mutex_unlock(&chat_history.lock);
+        return 0; //return no messages (no history)
+    }
+
+    int start_index = 0;
+
+    //here we have looping so then the oldest message is chat_hsitory.current_index_pointer
+    //if not looping is done in get history, then the oldest message is at 0
+    if (count == 15){
+        start_index = chat_history.current_index_pointer;
+    }
+
+    //we assume message_history already has history$ prefix with null termination and new line
+    for (int i = 0; i < count; i++){
+        int index = (start_index + i) % 15; //account for looping
+        strcpy(output_buffer[i], chat_history.messages_history[index]);
+    }
+
+    pthread_mutex_unlock(&chat_history.lock);
+    return count;
+}
+
 // Parse request string into command type and content (format: "command$content")
 int parse_request(const char *request, char *command_type, char *content) {
     const char *dollar_sign = strchr(request, '$');
@@ -351,9 +413,20 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
 
     update_client_active_time(client_address);
 
+    //send connection response
     char response[BUFFER_SIZE];
     snprintf(response, BUFFER_SIZE, "conn$ Hi %s, you have successfully connected to the chat\n", content);
     udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+
+    //send history messages
+    char history_messages[15][BUFFER_SIZE];
+    int history_message_count = get_history(history_messages);
+
+    for (int i = 0; i < history_message_count; i++){
+        udp_socket_write(socket_descriptor, client_address, history_messages[i], strlen(history_messages[i]));
+
+    }
+
     return;
 }
 
@@ -385,7 +458,6 @@ void handle_say(const char *content, struct sockaddr_in *client_address, int soc
     //broadcast_message(message, client_address, socket_descriptor);
 
     pthread_rwlock_rdlock(&client_list.lock);
-
     //logic from find_client_by_address
     client_node_t *current = client_list.head;
     while (current != NULL) {
@@ -394,6 +466,11 @@ void handle_say(const char *content, struct sockaddr_in *client_address, int soc
         current = current->next;
     }
     pthread_rwlock_unlock(&client_list.lock);
+
+    //add to history
+    char history_message[BUFFER_SIZE];
+    snprintf(history_message, BUFFER_SIZE, "history$ %s: %s\n", sender_address->client_name, content);
+    add_to_history(history_message);
 
     //housekeeping
     update_client_active_time(client_address);

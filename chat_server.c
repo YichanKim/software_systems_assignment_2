@@ -395,7 +395,8 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     }
 
     //Determine if the client is admin
-    int client_port = htons(client_address->sin_port); //undos htons as seen in udp.h. Converts back (network-short-to-host)
+    int client_port = ntohs(client_address->sin_port); //undos htons as seen in udp.h. Converts back (network-short-to-host)
+    printf("[DEBUG] Client_port: %d\n", client_port);
     int is_admin = 0;
 
     if (client_port == 6666){

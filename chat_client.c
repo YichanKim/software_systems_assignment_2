@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <ctype.h> //for isspace
+#include <unistd.h> //for getpid
 
 #define CLIENT_PORT 10000
 #define MAX_NAME_LEN 10
@@ -87,6 +88,34 @@ void route_acknowledge(const char*request, void *arg) {
             pthread_mutex_unlock(&state->lock);
 
         }
+    } else if (strcmp(command_type, "rename") == 0) {
+        // Server confirmed rename - update local name
+        // Format: "rename$ You are now known as NewName\n"
+        // Extract new name from content
+        const char *prefix = "You are now known as ";
+        const char *name_start = strstr(content, prefix);
+        
+        if (name_start != NULL) {
+            name_start += strlen(prefix);  // Move past the prefix
+            
+            // Find end of name (newline or end of string)
+            size_t name_len = 0;
+            while (name_start[name_len] != '\n' && name_start[name_len] != '\0' && name_len < MAX_NAME_LEN - 1) {
+                name_len++;
+            }
+            
+            // Update client name
+            pthread_mutex_lock(&state->lock);
+            strncpy(state->client_name, name_start, name_len);
+            state->client_name[name_len] = '\0';
+            pthread_mutex_unlock(&state->lock);
+            
+            // Display confirmation
+            printf("%s", content);
+        } else {
+            // Fallback - just display the message
+            printf("%s", content);
+        }
     } else if (strcmp(command_type, "sayto") == 0){
         pthread_mutex_lock(&state->lock);
         // After checking if file has been successfuly opened
@@ -113,6 +142,13 @@ void route_acknowledge(const char*request, void *arg) {
         state->running = 0;
         pthread_mutex_unlock(&state->lock);
         //break;
+    } else if (strcmp(command_type, "kick") == 0) {
+        // Server kicked this client - display message and disconnect
+        printf("%s", content);  // Display kick message
+        pthread_mutex_lock(&state->lock);
+        state->running = 0;  // Stop client
+        pthread_mutex_unlock(&state->lock);
+    } else {
     } else if(strcmp(command_type, "history") == 0) {
         pthread_mutex_lock(&state->lock);
         // After checking if file has been successfuly opened

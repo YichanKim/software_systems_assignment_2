@@ -43,7 +43,10 @@ typedef struct client_node {
 
     int is_admin;
 
-} client_node_t; // I'll add mute tracking later
+    muted_node_t *muted_head; // Head of linked list of muted clients
+    // This stores which clients THIS client has muted
+
+} client_node_t;
 
 typedef struct {
     client_node_t *head;
@@ -59,6 +62,15 @@ typedef struct {
     struct sockaddr_in client_address;
     int socket_descriptor;
 } request_handler_t;
+
+// Forward declaration for muted_node_t (needed because client_node_t uses it)
+typedef struct muted_node muted_node_t;
+
+//This represents one muted client in the list
+struct muted_node {
+    char client_name[MAX_NAME_LEN];
+    muted_node_t *next;
+};
 
 //Global client list - shared by all threads
 //This is where we store all the connected clients
@@ -87,6 +99,7 @@ void destroy_client_list() {
     client_node_t *current = client_list.head;
     while (current != NULL) {
         client_node_t *temp = current->next;
+        cleanup_muted_list(current);  // Clean up muted list first
         free(current);
         current = temp;
     }
@@ -111,6 +124,9 @@ client_node_t *add_client(const char *client_name, struct sockaddr_in *client_ad
         fprintf(stderr, "Failed to allocate memory for new client\n");
         return NULL;
     }
+
+    // Initialize muted list to empty
+    new_node->muted_head = NULL;
 
     // Copy the client name into the node
     // Use strncpy instead of strcpy to avoid buffer overflow
@@ -198,6 +214,9 @@ int remove_client_by_name(const char *client_name) {
         // Move head pointer to the next node (or NULL if it was the only node)
         client_list.head = client_list.head->next;
         
+        // Clean up muted list before freeing
+        cleanup_muted_list(to_remove);
+        
         // Now we can safely free the old head node
         free(to_remove);
         
@@ -217,6 +236,9 @@ int remove_client_by_name(const char *client_name) {
             
             current->next = to_remove->next;
 
+            // Clean up muted list before freeing
+            cleanup_muted_list(to_remove);
+            
             free(to_remove);
             
             pthread_rwlock_unlock(&client_list.lock);
@@ -245,6 +267,7 @@ int remove_client_by_address(struct sockaddr_in *client_address) {
             // Head node matches - remove it
             client_node_t *to_remove = client_list.head;
             client_list.head = client_list.head->next;
+            cleanup_muted_list(to_remove);  // Clean up muted list first
             free(to_remove);
             pthread_rwlock_unlock(&client_list.lock);
             return 0;
@@ -259,6 +282,7 @@ int remove_client_by_address(struct sockaddr_in *client_address) {
             // Found it!
             client_node_t *to_remove = current->next;
             current->next = to_remove->next;
+            cleanup_muted_list(to_remove);  // Clean up muted list first
             free(to_remove);
             pthread_rwlock_unlock(&client_list.lock);
             return 0;
@@ -285,6 +309,82 @@ void update_client_active_time(struct sockaddr_in *client_address) {
         current = current->next;
     }
     pthread_rwlock_unlock(&client_list.lock);
+}
+
+// Helper function to check if a client is in the muted list
+int is_client_muted_locked(client_node_t *client, const char *muted_name) {
+    muted_node_t *current = client->muted_head;
+
+    while (current != NULL) { // Walk through the muted list
+        if (strcmp(current->client_name, muted_name) == 0) {
+            return 1; // Found it, client is muted
+        }
+        current = current->next;
+    }
+    return 0; // Not found, client is not muted
+}
+
+// Function to add a client to the muted list
+int add_muted_client(client_node_t *client, const char *muted_name) {
+    if (is_client_muted_locked(client, muted_name)) {
+        return -1; // Client is already muted
+    }
+
+    // Allocate memory for the new muted node
+    muted_node_t *new_muted = (muted_node_t *)malloc(sizeof(muted_node_t));
+    if (new_muted == NULL) {
+        fprintf(stderr, "Failed to allocate memory for new muted client\n");
+        return -1;
+    }
+
+    strncpy(new_muted->client_name, muted_name, MAX_NAME_LEN - 1);
+    new_muted->client_name[MAX_NAME_LEN - 1] = '\0';
+
+    // Add to the FRONT of the muted list
+    new_muted->next = client->muted_head;
+    client->muted_head = new_muted; 
+
+    printf("[DEBUG] Client '%s' muted '%s'\n", client->client_name, muted_name);
+    return 0;  // Success
+}
+
+// Remove a client from the muted list (unmute)
+int remove_muted_client(client_node_t *client, const char *muted_name) {
+    // Special case: removing head node
+    if (client->muted_head != NULL && 
+        strcmp(client->muted_head->client_name, muted_name) == 0) {
+        muted_node_t *to_remove = client->muted_head;
+        client->muted_head = client->muted_head->next;
+        free(to_remove);
+        printf("[DEBUG] Client '%s' unmuted '%s'\n", client->client_name, muted_name);
+        return 0;
+    }
+    
+    // General case: find and remove from middle/end
+    muted_node_t *current = client->muted_head;
+    while (current != NULL && current->next != NULL) {
+        if (strcmp(current->next->client_name, muted_name) == 0) {
+            muted_node_t *to_remove = current->next;
+            current->next = to_remove->next;
+            free(to_remove);
+            printf("[DEBUG] Client '%s' unmuted '%s'\n", client->client_name, muted_name);
+            return 0;
+        }
+        current = current->next;
+    }
+    
+    return -1;  // Not found in muted list
+}
+
+// Function to clean up the mited list when the client disconnets
+void cleanup_muted_list(client_node_t *client) {
+    muted_node_t *current = client->muted_head;
+    while (current != NULL) {
+        muted_node_t *temp = current->next;
+        free(current);
+        current = temp;
+    }
+    client->muted_head = NULL;
 }
 
 // Parse request string into command type and content (format: "command$content")
@@ -324,8 +424,14 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
         return;
     }
 
+    // Trim the content to get the name
+    char trimmed_content[MAX_NAME_LEN];
+    strncpy(trimmed_content, content, MAX_NAME_LEN - 1);
+    trimmed_content[MAX_NAME_LEN - 1] = '\0';
+    char *trimmed_name = trim(trimmed_content);
+    
     //Check if name already exists
-    if (find_client_by_name(content) != NULL){
+    if (find_client_by_name(trimmed_name) != NULL){
         char error_msg[BUFFER_SIZE];
         snprintf(error_msg, BUFFER_SIZE, "Error$ Name already taken. Please choose another name\n");
         udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
@@ -333,14 +439,14 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     }
 
     //Determine if the client is admin
-    int client_port = htons(client_address->sin_port); //undos htons as seen in udp.h. Converts back (network-short-to-host)
+    int client_port = ntohs(client_address->sin_port); // Convert from network byte order to host byte order
     int is_admin = 0;
 
     if (client_port == 6666){
         is_admin = 1;
     }
 
-    client_node_t *added_client_node = add_client(content, client_address, is_admin);
+    client_node_t *added_client_node = add_client(trimmed_name, client_address, is_admin);
 
     if(added_client_node == NULL){
         char error_msg[BUFFER_SIZE];
@@ -352,7 +458,7 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     update_client_active_time(client_address);
 
     char response[BUFFER_SIZE];
-    snprintf(response, BUFFER_SIZE, "conn$ Hi %s, you have successfully connected to the chat\n", content);
+    snprintf(response, BUFFER_SIZE, "conn$ Hi %s, you have successfully connected to the chat\n", trimmed_name);
     udp_socket_write(socket_descriptor, client_address, response, strlen(response));
     return;
 }
@@ -373,7 +479,7 @@ void handle_say(const char *content, struct sockaddr_in *client_address, int soc
     if (sender_address == NULL){
         char error_msg[BUFFER_SIZE];
         snprintf(error_msg, BUFFER_SIZE, "Error$ You have not connected to server yet. Please connect to server using 'conn$ [NAME].\n");
-        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));  
         return;
     }
 
@@ -386,10 +492,29 @@ void handle_say(const char *content, struct sockaddr_in *client_address, int soc
 
     pthread_rwlock_rdlock(&client_list.lock);
 
-    //logic from find_client_by_address
+    // Broadcast to all clients, but skip if they muted the sender
     client_node_t *current = client_list.head;
     while (current != NULL) {
-        //write to all clients
+        // Skip sending to sender (they don't need to see their own message)
+        // Compare addresses to see if this is the sender
+        if (current->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            current->client_address.sin_port == client_address->sin_port) {
+            // This is the sender - skip them
+            current = current->next;
+            continue;
+        }
+        
+        // Check if this recipient has muted the sender
+        // sender_address->client_name is the name of who sent the message
+        if (is_client_muted_locked(current, sender_address->client_name)) {
+            // This recipient has muted the sender - skip sending to them
+            printf("[DEBUG] Skipping message to '%s' (they muted '%s')\n", 
+                   current->client_name, sender_address->client_name);
+            current = current->next;
+            continue;
+        }
+        
+        // Send message to this client (they haven't muted the sender)
         udp_socket_write(socket_descriptor, &current->client_address, (char *) message, strlen(message));
         current = current->next;
     }
@@ -527,6 +652,242 @@ void handle_disconn(const char *content, struct sockaddr_in *client_address, int
     return;
 }
 
+// Handle mute$ command - add a client to the requester's muted list
+void handle_mute(const char *content, struct sockaddr_in *client_address, int socket_descriptor) {
+   // Validate content length
+   size_t len = strlen(content);
+   if (len == 0 || len >= MAX_NAME_LEN) {
+       // Invalid - but per requirements, mute$ doesn't send error responses
+       // So we just return silently
+       return;
+   }
+   
+   // Trim the content to get the name to mute
+   char muted_name[MAX_NAME_LEN];
+   strncpy(muted_name, content, MAX_NAME_LEN - 1);
+   muted_name[MAX_NAME_LEN - 1] = '\0';
+   char *trimmed_name = trim(muted_name);
+   
+   // Find the requester (who wants to mute someone)
+   client_node_t *requester = find_client_by_address(client_address);
+   if (requester == NULL) {
+       // Client not connected - but mute$ doesn't send errors, so return
+       return;
+   }
+   
+   // Check if requester is trying to mute themselves (optional validation)
+   if (strcmp(requester->client_name, trimmed_name) == 0) {
+       // Can't mute yourself - silently return
+       return;
+   }
+   
+   // Find the client to mute
+   client_node_t *to_mute = find_client_by_name(trimmed_name);
+   if (to_mute == NULL) {
+       // Client to mute doesn't exist - but mute$ doesn't send errors
+       return;
+   }
+   
+   // We need write lock because we're modifying the client's muted list
+   pthread_rwlock_wrlock(&client_list.lock);
+   
+   int result = add_muted_client(requester, trimmed_name);
+   
+   pthread_rwlock_unlock(&client_list.lock);
+   
+   // Update requester's activity time
+   update_client_active_time(client_address);
+   
+    // Note: Per requirements, mute$ sends NO response to client
+    // The effect will be seen in future broadcasts (they won't receive messages from muted client)
+}
+
+// Handle unmute$ command - remove a client from requester's muted list
+void handle_unmute(const char *content, struct sockaddr_in *client_address, int socket_descriptor) {
+    // Validate content length
+    size_t len = strlen(content);
+    if (len == 0 || len >= MAX_NAME_LEN) {
+        // Invalid - unmute$ doesn't send error responses, so return silently
+        return;
+    }
+    
+    // Trim the content to get the name to unmute
+    char unmuted_name[MAX_NAME_LEN];
+    strncpy(unmuted_name, content, MAX_NAME_LEN - 1);
+    unmuted_name[MAX_NAME_LEN - 1] = '\0';
+    char *trimmed_name = trim(unmuted_name);
+    
+    // Find the requester (who wants to unmute someone)
+    client_node_t *requester = find_client_by_address(client_address);
+    if (requester == NULL) {
+        // Client not connected - unmute$ doesn't send errors
+        return;
+    }
+    
+    // We need write lock because we're modifying the client's muted list
+    pthread_rwlock_wrlock(&client_list.lock);
+    
+    // Remove from muted list
+    int result = remove_muted_client(requester, trimmed_name);
+    
+    pthread_rwlock_unlock(&client_list.lock);
+    
+    // Update requester's activity time
+    update_client_active_time(client_address);
+    
+    // Note: Per requirements, unmute$ sends NO response to client
+    // Effect will be seen in future broadcasts (they'll receive messages again)
+}
+
+// Function to handle rename$ command - change a client's chat name
+void handle_rename(const char *content, struct sockaddr_in *client_address, int socket_descriptor) {
+    // Validate content length
+    size_t len = strlen(content);
+    if (len == 0 || len >= MAX_NAME_LEN) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ No name provided or name too long. Expected 'rename$ [NEW_NAME]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    // Trim the new name
+    char new_name[MAX_NAME_LEN];
+    strncpy(new_name, content, MAX_NAME_LEN - 1);
+    new_name[MAX_NAME_LEN - 1] = '\0';
+    char *trimmed_name = trim(new_name);
+
+    // Find the requester client (who wants to rename)
+    client_node_t *requester = find_client_by_address(client_address);
+    if (requester == NULL) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ You are not connected. Please connect first using 'conn$ [NAME]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    // Check if new name is already in use
+    client_node_t *existing = find_client_by_name(trimmed_name);
+    if (existing != NULL && existing != requester) {
+        // Name already taken by someone else
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Name '%s' already in use. Please choose another name\n", trimmed_name);
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    // Check if they're trying to rename the same name
+    if (strcmp(requester->client_name, trimmed_name) == 0) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ You are already named '%s'\n", trimmed_name);
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+
+    // Store old name for debugging
+    char old_name[MAX_NAME_LEN];
+    strncpy(old_name, requester->client_name, MAX_NAME_LEN - 1);
+    old_name[MAX_NAME_LEN - 1] = '\0';
+
+    // We need to write lock to modify the client's name
+    pthread_rwlock_wrlock(&client_list.lock);
+
+    // Once all checks pass, update the name
+    strncpy(requester->client_name, trimmed_name, MAX_NAME_LEN - 1);
+    requester->client_name[MAX_NAME_LEN - 1] = '\0';
+
+    pthread_rwlock_unlock(&client_list.lock); // Unlock
+    
+   // Send success confirmation
+   char response[BUFFER_SIZE];
+   snprintf(response, BUFFER_SIZE, "rename$ You are now known as %s\n", trimmed_name);
+   udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+   
+   printf("[DEBUG] Client '%s' renamed to '%s'\n", old_name, trimmed_name);
+}
+
+// Handle the kick$ command - remove a client from the server
+void handle_kick(const char *content, struct sockaddr_in *client_address, int socket_descriptor) {
+    // Validate content length
+    size_t len = strlen(content);
+    if (len == 0 || len >= MAX_NAME_LEN) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ No name provided or name too long. Expected 'kick$ [CLIENT_NAME]'\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    // Trim the name to kick
+    char kicked_name[MAX_NAME_LEN];
+    strncpy(kicked_name, content, MAX_NAME_LEN - 1);
+    kicked_name[MAX_NAME_LEN - 1] = '\0';
+    char *trimmed_name = trim(kicked_name);
+    
+    // Find the requester (who wants to kick someone)
+    client_node_t *requester = find_client_by_address(client_address);
+    if (requester == NULL) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ You are not connected. Please connect first\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    // Check if requester is admin (port 6666)
+    // The is_admin flag is set during conn$, but let's also check port directly for safety
+    int requester_port = ntohs(client_address->sin_port);
+    if (requester_port != 6666 && !requester->is_admin) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ Only admin can kick users\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    // Find the client to kick
+    client_node_t *to_kick = find_client_by_name(trimmed_name);
+    if (to_kick == NULL) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ User '%s' not found\n", trimmed_name);
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    // Check if admin is trying to kick themselves (optional)
+    if (to_kick == requester) {
+        char error_msg[BUFFER_SIZE];
+        snprintf(error_msg, BUFFER_SIZE, "Error$ You cannot kick yourself\n");
+        udp_socket_write(socket_descriptor, client_address, error_msg, strlen(error_msg));
+        return;
+    }
+    
+    // Store kicked client's address before we remove them
+    struct sockaddr_in kicked_address = to_kick->client_address;
+    
+    // Send removal message to the kicked client
+    char kick_msg[BUFFER_SIZE];
+    snprintf(kick_msg, BUFFER_SIZE, "kick$ You have been removed from the chat\n");
+    udp_socket_write(socket_descriptor, &kicked_address, kick_msg, strlen(kick_msg));
+    
+    // Remove client from list (remove_client_by_address will clean up muted list)
+    remove_client_by_address(&kicked_address);
+    
+    // Broadcast removal message to all remaining clients
+    char broadcast_msg[BUFFER_SIZE];
+    snprintf(broadcast_msg, BUFFER_SIZE, "say$ System: %s has been removed from the chat\n", trimmed_name);
+    
+    // Broadcast to all remaining clients
+    pthread_rwlock_rdlock(&client_list.lock);
+    client_node_t *current = client_list.head;
+    while (current != NULL) {
+        udp_socket_write(socket_descriptor, &current->client_address, broadcast_msg, strlen(broadcast_msg));
+        current = current->next;
+    }
+    pthread_rwlock_unlock(&client_list.lock);
+    
+    // Update admin's activity time
+    update_client_active_time(client_address);
+    
+    printf("[DEBUG] Admin '%s' kicked '%s'\n", requester->client_name, trimmed_name);
+}
+
 // Route parsed request to appropriate handler function based on command type
 void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
     char command_type[BUFFER_SIZE];
@@ -560,19 +921,17 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
         printf("[DEBUG] Routing to handle_disconn");
         handle_disconn(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "mute") == 0) {
-        printf("[DEBUG] Routing to handle_mute (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_mute\n");
+        handle_mute(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "unmute") == 0) {
-        printf("[DEBUG] Routing to handle_unmute (not implemented yet)\n");
+        printf("[DEBUG] Routing to handle_unmute\n");
+        handle_unmute(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "rename") == 0) {
-        printf("[DEBUG] Routing to handle_rename (not implemented yet)\n");
-        char response[BUFFER_SIZE];
-        snprintf(response, BUFFER_SIZE, "rename$ handler not yet implemented\n");
-        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+        printf("[DEBUG] Routing to handle_rename\n");
+        handle_rename(trimmed_content, client_address, socket_descriptor);
     } else if (strcmp(trimmed_command, "kick") == 0) {
-        printf("[DEBUG] Routing to handle_kick (not implemented yet)\n");
-        char response[BUFFER_SIZE];
-        snprintf(response, BUFFER_SIZE, "kick$ handler not yet implemented\n");
-        udp_socket_write(socket_descriptor, client_address, response, strlen(response));
+        printf("[DEBUG] Routing to handle_kick\n");
+        handle_kick(trimmed_content, client_address, socket_descriptor);
     } else {
         printf("[DEBUG] Unknown command type: '%s'\n", trimmed_command);
         char error_msg[BUFFER_SIZE];

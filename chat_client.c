@@ -148,7 +148,16 @@ void route_acknowledge(const char*request, void *arg) {
         pthread_mutex_lock(&state->lock);
         state->running = 0;  // Stop client
         pthread_mutex_unlock(&state->lock);
-    } else {
+    } else if (strcmp(command_type, "ping") == 0) {
+        // Server is pinging us - respond immediately with ret-ping
+        char ret_ping_msg[BUFFER_SIZE];
+        snprintf(ret_ping_msg, BUFFER_SIZE, "ret-ping$\n");
+        
+        pthread_mutex_lock(&state->lock);
+        udp_socket_write(state->socket_descriptor, &state->server_addr, ret_ping_msg, strlen(ret_ping_msg));
+        pthread_mutex_unlock(&state->lock);
+        
+        printf("[DEBUG] Responded to server ping\n");
     } else if(strcmp(command_type, "history") == 0) {
         pthread_mutex_lock(&state->lock);
         // After checking if file has been successfuly opened
@@ -159,7 +168,7 @@ void route_acknowledge(const char*request, void *arg) {
                 fflush(state->chat_write_file);
             }
         pthread_mutex_unlock(&state->lock);
-        } else {
+    } else {
         fprintf(stderr, "Error$ Error from Server. Please make appropriate changes.\n");
         return;
     }

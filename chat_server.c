@@ -9,6 +9,10 @@
 #include "udp.h"
 
 #define MAX_NAME_LEN 256
+// Timeout threshold for inactive clients
+#define INACTIVITY_THRESHOLD 300 // 5 minutes in seconds
+#define PING_TIMEOUT 10          // 10 seconds to wait for ret-ping
+#define MONITOR_INTERVAL 30      // Check every 30 seconds
 
 //Helper function to do trimming
 char* trim(char *str){
@@ -63,6 +67,24 @@ typedef struct {
     int socket_descriptor;
 } request_handler_t;
 
+// Structure to track clients that are being pinged
+// We need to know which clients we've pinged and when, so that we can check for timeouts
+typedef struct ping_tracker {
+    struct sockaddr_in client_address; // Address of the client we pinged
+    time_t ping_time;                  // Time we pinged the client
+    struct ping_tracker *next;         // Linked list of pinged clients
+} ping_tracker_t;
+
+// Global list of clients currently being pinged
+// This is separate from the client list - it only tracks who we've pinged
+typedef struct {
+    ping_tracker_t *head;
+    pthread_mutex_t lock;  // Mutex for thread-safe access
+} ping_list_t;
+
+// Global ping list - shared by monitoring thread and main thread
+ping_list_t ping_list;
+
 // Forward declaration for muted_node_t (needed because client_node_t uses it)
 typedef struct muted_node muted_node_t;
 
@@ -107,6 +129,17 @@ void init_chat_history() {
     memset(chat_history.messages_history, 0, sizeof(chat_history.messages_history));
     //initialise the lock
     pthread_mutex_init(&chat_history.lock, NULL);
+}
+
+// Initialize the ping tracking list
+void init_ping_list() {
+    ping_list.head = NULL;
+    int rc = pthread_mutex_init(&ping_list.lock, NULL);
+    if (rc != 0) {
+        fprintf(stderr, "Failed to initialize ping list mutex\n");
+        exit(1);
+    }
+    printf("[DEBUG] Ping list initialized\n");
 }
 
 // Function to clean up the client list (Called on server shutdown)
@@ -219,6 +252,19 @@ client_node_t *find_client_by_address(struct sockaddr_in *client_address) {
     return NULL;
 }
 
+// Helper function to find client by address when lock is already held
+client_node_t *find_client_by_address_locked(struct sockaddr_in *client_address) {
+    client_node_t *current = client_list.head;
+    while (current != NULL) {
+        if (current->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            current->client_address.sin_port == client_address->sin_port) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
 // Function to remove a client from the list by their name
 int remove_client_by_name(const char *client_name) {
     pthread_rwlock_wrlock(&client_list.lock);
@@ -275,10 +321,8 @@ int remove_client_by_name(const char *client_name) {
     return -1;  // Not found
 }
 
-// Function to remove a client by their IP address and port
-int remove_client_by_address(struct sockaddr_in *client_address) {
-    pthread_rwlock_wrlock(&client_list.lock);
-    
+// Helper function to remove client by address when lock is already held
+int remove_client_by_address_locked(struct sockaddr_in *client_address) {
     // Check if head node matches
     if (client_list.head != NULL) {
         if (client_list.head->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
@@ -288,7 +332,6 @@ int remove_client_by_address(struct sockaddr_in *client_address) {
             client_list.head = client_list.head->next;
             cleanup_muted_list(to_remove);  // Clean up muted list first
             free(to_remove);
-            pthread_rwlock_unlock(&client_list.lock);
             return 0;
         }
     }
@@ -303,15 +346,21 @@ int remove_client_by_address(struct sockaddr_in *client_address) {
             current->next = to_remove->next;
             cleanup_muted_list(to_remove);  // Clean up muted list first
             free(to_remove);
-            pthread_rwlock_unlock(&client_list.lock);
             return 0;
         }
         current = current->next;
     }
 
     // Not found
-    pthread_rwlock_unlock(&client_list.lock);
     return -1;
+}
+
+// Function to remove a client by their IP address and port
+int remove_client_by_address(struct sockaddr_in *client_address) {
+    pthread_rwlock_wrlock(&client_list.lock);
+    int result = remove_client_by_address_locked(client_address);
+    pthread_rwlock_unlock(&client_list.lock);
+    return result;
 }
 
 // Function to update a client's last active time when they send a request
@@ -404,6 +453,97 @@ void cleanup_muted_list(client_node_t *client) {
         current = temp;
     }
     client->muted_head = NULL;
+}
+
+// Add a client to the ping tracking list (when we send a ping)
+int add_ping_tracker(struct sockaddr_in *client_address) {
+    pthread_mutex_lock(&ping_list.lock);
+    
+    // Check if already in list (shouldn't happen, but be safe)
+    ping_tracker_t *current = ping_list.head;
+    while (current != NULL) {
+        if (current->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            current->client_address.sin_port == client_address->sin_port) {
+            // Already being tracked - update ping time
+            current->ping_time = time(NULL);
+            pthread_mutex_unlock(&ping_list.lock);
+            return 0;
+        }
+        current = current->next;
+    }
+    
+    // Not in list - add new tracker
+    ping_tracker_t *new_tracker = (ping_tracker_t *)malloc(sizeof(ping_tracker_t));
+    if (new_tracker == NULL) {
+        fprintf(stderr, "Failed to allocate memory for ping tracker\n");
+        pthread_mutex_unlock(&ping_list.lock);
+        return -1;
+    }
+    
+    new_tracker->client_address = *client_address;
+    new_tracker->ping_time = time(NULL);
+    new_tracker->next = ping_list.head;
+    ping_list.head = new_tracker;
+    
+    pthread_mutex_unlock(&ping_list.lock);
+    printf("[DEBUG] Added ping tracker for client at port %d\n", ntohs(client_address->sin_port));
+    return 0;
+}
+
+// Remove a client from ping tracking list (when they respond with ret-ping)
+int remove_ping_tracker(struct sockaddr_in *client_address) {
+    pthread_mutex_lock(&ping_list.lock);
+    
+    // Check if head node matches
+    if (ping_list.head != NULL) {
+        if (ping_list.head->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            ping_list.head->client_address.sin_port == client_address->sin_port) {
+            ping_tracker_t *to_remove = ping_list.head;
+            ping_list.head = ping_list.head->next;
+            free(to_remove);
+            pthread_mutex_unlock(&ping_list.lock);
+            printf("[DEBUG] Removed ping tracker for client at port %d\n", ntohs(client_address->sin_port));
+            return 0;
+        }
+    }
+    
+    // Check rest of list
+    ping_tracker_t *current = ping_list.head;
+    while (current != NULL && current->next != NULL) {
+        if (current->next->client_address.sin_addr.s_addr == client_address->sin_addr.s_addr &&
+            current->next->client_address.sin_port == client_address->sin_port) {
+            ping_tracker_t *to_remove = current->next;
+            current->next = to_remove->next;
+            free(to_remove);
+            pthread_mutex_unlock(&ping_list.lock);
+            printf("[DEBUG] Removed ping tracker for client at port %d\n", ntohs(client_address->sin_port));
+            return 0;
+        }
+        current = current->next;
+    }
+    
+    // Not found
+    pthread_mutex_unlock(&ping_list.lock);
+    return -1;
+}
+
+// Clean up all ping trackers (called on server shutdown)
+void destroy_ping_list() {
+    pthread_mutex_lock(&ping_list.lock);
+    
+    ping_tracker_t *current = ping_list.head;
+    while (current != NULL) {
+        ping_tracker_t *temp = current->next;
+        free(current);
+        current = temp;
+    }
+    
+    ping_list.head = NULL;
+    pthread_mutex_unlock(&ping_list.lock);
+    pthread_mutex_destroy(&ping_list.lock);
+    printf("[DEBUG] Ping list destroyed\n");
+}
+
 void add_to_history(const char *message) {
     
     //we assume that message is less than the buffer size.
@@ -503,6 +643,7 @@ void handle_conn(const char *content, struct sockaddr_in *client_address, int so
     int is_admin = 0;
 
     if (client_port == 6666){
+        is_admin = 1;
     }
 
     client_node_t *added_client_node = add_client(trimmed_name, client_address, is_admin);
@@ -963,6 +1104,28 @@ void handle_kick(const char *content, struct sockaddr_in *client_address, int so
     printf("[DEBUG] Admin '%s' kicked '%s'\n", requester->client_name, trimmed_name);
 }
 
+// Handle ret-ping$ command - client responds to our ping
+void handle_ret_ping(const char *content, struct sockaddr_in *client_address, int socket_descriptor) {
+    // Client is responding to our ping - they're still alive!
+    // Find the client and update their active time
+    client_node_t *client = find_client_by_address(client_address);
+    
+    if (client != NULL) {
+        // Update their activity time (they responded, so they're active)
+        update_client_active_time(client_address);
+        
+        // Remove them from ping tracking list (they responded)
+        remove_ping_tracker(client_address);
+        
+        printf("[DEBUG] Client '%s' responded to ping\n", client->client_name);
+    } else {
+        // Client not in list (maybe already removed?) - just remove from ping list
+        remove_ping_tracker(client_address);
+    }
+    
+    // No response needed - ping/ret-ping is silent
+}
+
 // Route parsed request to appropriate handler function based on command type
 void route_request(const char *request, struct sockaddr_in *client_address, int socket_descriptor) {
     char command_type[BUFFER_SIZE];
@@ -1007,6 +1170,9 @@ void route_request(const char *request, struct sockaddr_in *client_address, int 
     } else if (strcmp(trimmed_command, "kick") == 0) {
         printf("[DEBUG] Routing to handle_kick\n");
         handle_kick(trimmed_content, client_address, socket_descriptor);
+    } else if (strcmp(trimmed_command, "ret-ping") == 0) {
+        printf("[DEBUG] Routing to handle_ret_ping\n");
+        handle_ret_ping(trimmed_content, client_address, socket_descriptor);
     } else {
         printf("[DEBUG] Unknown command type: '%s'\n", trimmed_command);
         char error_msg[BUFFER_SIZE];
@@ -1073,6 +1239,124 @@ void *listener_thread(void *arg) {
     return NULL;
 }
 
+// Monitoring thread that checks for inactive clients and pings them
+void *monitor_thread(void *arg) {
+    int socket_descriptor = *(int *)arg;
+    printf("[DEBUG] Monitor thread started\n");
+    
+    while (1) {
+        // Sleep for the monitoring interval (30 seconds)
+        sleep(MONITOR_INTERVAL);
+        
+        time_t current_time = time(NULL);
+        
+        // Get all clients and check their activity
+        pthread_rwlock_rdlock(&client_list.lock);
+        
+        client_node_t *current = client_list.head;
+        while (current != NULL) {
+            // Calculate how long since last activity
+            time_t time_since_active = current_time - current->last_active_time;
+            
+            // Check if client has been inactive for more than threshold
+            if (time_since_active >= INACTIVITY_THRESHOLD) {
+                // Check if we're already pinging this client
+                pthread_mutex_lock(&ping_list.lock);
+                int already_pinging = 0;
+                ping_tracker_t *ping_current = ping_list.head;
+                while (ping_current != NULL) {
+                    if (ping_current->client_address.sin_addr.s_addr == current->client_address.sin_addr.s_addr &&
+                        ping_current->client_address.sin_port == current->client_address.sin_port) {
+                        already_pinging = 1;
+                        break;
+                    }
+                    ping_current = ping_current->next;
+                }
+                pthread_mutex_unlock(&ping_list.lock);
+                
+                // If we're not already pinging them, send a ping
+                if (!already_pinging) {
+                    printf("[DEBUG] Client '%s' inactive for %ld seconds, sending ping\n", 
+                           current->client_name, time_since_active);
+                    
+                    // Send ping message
+                    char ping_msg[BUFFER_SIZE];
+                    snprintf(ping_msg, BUFFER_SIZE, "ping$\n");
+                    udp_socket_write(socket_descriptor, &current->client_address, ping_msg, strlen(ping_msg));
+                    
+                    // Add to ping tracking list
+                    add_ping_tracker(&current->client_address);
+                }
+            }
+            
+            current = current->next;
+        }
+        
+        pthread_rwlock_unlock(&client_list.lock);
+        
+        // Now check for ping timeouts (clients that didn't respond)
+        pthread_mutex_lock(&ping_list.lock);
+        ping_tracker_t *ping_current = ping_list.head;
+        ping_tracker_t *ping_prev = NULL;
+        
+        while (ping_current != NULL) {
+            time_t time_since_ping = current_time - ping_current->ping_time;
+            
+            // If ping timeout exceeded, remove the client
+            if (time_since_ping >= PING_TIMEOUT) {
+                printf("[DEBUG] Client at port %d did not respond to ping, removing...\n", 
+                       ntohs(ping_current->client_address.sin_port));
+                
+                // Find the client node to get their name for broadcast
+                pthread_rwlock_wrlock(&client_list.lock);
+                client_node_t *to_remove = find_client_by_address_locked(&ping_current->client_address);
+                char removed_name[MAX_NAME_LEN] = "Unknown";
+                
+                if (to_remove != NULL) {
+                    strncpy(removed_name, to_remove->client_name, MAX_NAME_LEN - 1);
+                    removed_name[MAX_NAME_LEN - 1] = '\0';
+                }
+                
+                // Remove client from list (lock already held)
+                if (to_remove != NULL) {
+                    remove_client_by_address_locked(&ping_current->client_address);
+                }
+                pthread_rwlock_unlock(&client_list.lock);
+                
+                // Broadcast removal message
+                char broadcast_msg[BUFFER_SIZE];
+                snprintf(broadcast_msg, BUFFER_SIZE, "say$ System: %s has been removed due to inactivity\n", removed_name);
+                
+                pthread_rwlock_rdlock(&client_list.lock);
+                client_node_t *broadcast_current = client_list.head;
+                while (broadcast_current != NULL) {
+                    udp_socket_write(socket_descriptor, &broadcast_current->client_address, 
+                                    broadcast_msg, strlen(broadcast_msg));
+                    broadcast_current = broadcast_current->next;
+                }
+                pthread_rwlock_unlock(&client_list.lock);
+                
+                // Remove from ping list
+                ping_tracker_t *to_free = ping_current;
+                if (ping_prev == NULL) {
+                    ping_list.head = ping_current->next;
+                } else {
+                    ping_prev->next = ping_current->next;
+                }
+                ping_current = ping_current->next;
+                free(to_free);
+            } else {
+                ping_prev = ping_current;
+                ping_current = ping_current->next;
+            }
+        }
+        
+        pthread_mutex_unlock(&ping_list.lock);
+    }
+    
+    return NULL;
+}
+
 int main(int argc, char *argv[])
 {
 
@@ -1086,6 +1370,9 @@ int main(int argc, char *argv[])
 
     //client list init
     init_client_list();
+    
+    //chat history init
+    init_chat_history();
 
     // Demo code (remove later)
     printf("[DEBUG] Server is listening on port %d\n", SERVER_PORT);
@@ -1101,13 +1388,29 @@ int main(int argc, char *argv[])
         destroy_client_list();
         return 1;
     }
+    
+    // Initialize ping list
+    init_ping_list();
+    
+    // Create monitoring thread
+    pthread_t monitor_tid;
+    int monitor_thread_rc = pthread_create(&monitor_tid, NULL, monitor_thread, &sd);
+    
+    if (monitor_thread_rc != 0) {
+        fprintf(stderr, "Error$ monitor thread creation error\n");
+        close(sd);
+        destroy_client_list();
+        destroy_ping_list();
+        return 1;
+    }
 
     //keep listener thread alive
     pthread_join(listener_tid, NULL);
 
     //cleanup
     close(sd);
+    destroy_ping_list();  // Add this line
     destroy_client_list();
-
+    
     return 0;
 }

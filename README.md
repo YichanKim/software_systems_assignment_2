@@ -7,8 +7,8 @@
 - Name: Yichan Kim
 
 **Student 2:**
-- CID: [fill in CID]
-- Name: [fill in Name]
+- CID: Sumukh Adiraju
+- Name: 02563601
 ---
 
 ## Project Summary

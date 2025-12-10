@@ -11,101 +11,101 @@
 - Name: [fill in Name]
 ---
 
-## Overview
+## Project Summary
 
-This project implements a multithreaded UDP-based chat application as specified in Assignment 2. The server uses a listener thread to receive incoming requests and spawns worker threads to handle each client request. Each client has a sender thread for reading user input and a listener thread for receiving server responses.
+For this assignment we built a UDP-based chat system using multi-threading on both the client and server. The server manages all connected users, and the client runs separate threads for sending and receiving. The system supports:
+
+- Broadcast messages
+- Private messages
+- Rename and mute commands
+- Admin kicking
+- Chat history on join
+- Inactivity timeout
+
+---
+
+##Implemenntation
+
+### Connecting
+
+- Clients connect using `conn$ <name>`.
+- The server checks for:
+  - Duplicate names
+  - Overly long names
+  - Whether the client is an admin (port 6666)
+- On successful connection, the server:
+  - Sends a confirmation message
+  - Sends chat history
+
+### Broadcast Messages (`say$`)
+
+- Broadcasts (sends) message to all users.
+- Messages are saved in a chat history buffer.
+- Last-active timestamp is updated.
+- Muted users do not receive broadcasts from their muted list.
+
+### Private Messages (`sayto$`)
+
+- Syntax: `sayto$ <name> <msg>`
+- The server checks the recipient exists.
+- The message is sent only to the sender and receiver.
+
+### Disconnect (`disconn$`)
+
+- Removes the user from the server list.
+- Client prints a goodbye message and exits.
+
+### Mute / Unmute
+
+- Each client keeps a mute list (linked list).
+- No server acknowledgement message.
+- The effect is apparent only in later broadcasts.
+
+### Rename (`rename$ <newname>`)
+
+- Updates the client’s name on the server.
+- Checks:
+  - Length
+  - Duplicates
+- Server replies with a confirmation message.
+
+### Admin Kick
+
+- Admin clients connect from port 6666.
+- They can issue the following command: `kick$ <name>`.
+- Server:
+  - Notifies the kicked user
+  - Broadcasts the removal
+
+### Client UI / Threading
+
+- The client uses two threads:
+  - One reads stdin
+  - One listens for incoming server messages
+- Messages are written to `iChat_<PID>.txt`.
+- A second terminal runs `tail -f` on this file.
+- Output is manually flushed to avoid delays.
 
 ---
 
-## Implemented Features
+## Proposed Extensions Implemented
 
-#### 1. **Connection Management**
-- **`conn$` Command**: Connection to server by client
-  - Server validates name (uniqueness, length)
-  - Admin detection based on port number
-  - Sends connection confirmation with command prefix: `conn$ Hi [NAME], you have successfully connected to the chat`
-  - Sends chat history on client connection
+### 1. Chat History on Connect
 
-#### 2. **Message Broadcasting**
-- **`say$` Command**: Broadcast messages to all clients
-  - Messages formatted as: `say$ [sender_name]: [message]`
-  - Respects mute settings
-  - Updates sender's activity time and adds messages to chat history
+- Implemented a circular buffer storing the last 15 broadcast messages.
+- New clients receive these immediately after connecting.
+- A mutex protects the history from concurrent writes.
 
-#### 3. **Private Messaging**
-- **`sayto$` Command**: Send private messages to a client
-  - Format: `sayto$ [recipient_name] [message]`
-  - Validates recipient existence
-  - Sends message to both recipient and sender
+### 2. Inactive User Removal
 
-#### 4. **Disconnection**
-- **`disconn$` Command**: Disconnect from server
-  - Removes client from server's client list
-  - Sends confirmation: `disconn$ Disconnected. Bye!`
-  - Client terminates cleanly upon receiving confirmation
-
-#### 5. **Mute/Unmute Functionality**
-- **`mute$` Command**: Mute a specific client
-  - Per-client mute lists (linked list implementation)
-  - Effect seen in future broadcasts
-  
-- **`unmute$` Command**: Unmute a previously muted client
-  - Removes client from mute list
-  - Effect seen in future broadcasts
-
-#### 6. **Name Management**
-- **`rename$` Command**: Change client's chat name
-  - Validates new name uniqueness
-  - Updates name in client list
-  - Client updates local name upon server confirmation
-
-#### 7. **Admin Functionality**
-- **`kick$` Command**: Admin-only command to forcibly remove clients
-  - Admin detection: clients connecting from port 6666
-  - Validates admin status before allowing kick
-  - Sends removal message to kicked client: `kick$ You have been removed from the chat`
-  - Broadcasts removal notification to all remaining clients
-  - Prevents self-kick
-
-### User Interface (Fully Implemented)
-
-- **Two-Terminal Approach**: We implemented the alternative file-based UI option from the assignment
-  - Client writes incoming messages to `iChat_<PID>.txt` file (using process ID to make filenames unique). Users can view messages in real-time using `tail -f iChat_<PID>.txt` in a separate terminal
-  - Input handled in main terminal, output written to file
-  - File automatically flushed after each write for real-time updates
-
-### Proposed Extensions (Fully Implemented)
-
-#### PE1: Chat History at Connection
-- **Implementation Details**:
-  - Circular buffer data structure storing last 15 broadcast messages
-  - Thread-safe with mutex protection
-  - Automatically sent to newly connected clients after connection confirmation
-
-#### PE2: Remove Inactive Clients
-- **Implementation Details**:
-  - Monitoring thread runs every 30 seconds
-  - Maintains `last_active_time` for each client (updated on every request)
-  - Inactivity threshold: 5 minutes (300 seconds) as suggested in the assignment
-  - Ping mechanism: Server sends `ping$` message to inactive clients
-  - Clients respond with `ret-ping$` to indicate they're alive
-  - Ping timeout: 10 seconds
-  - Clients that don't respond are automatically removed from the chat
-  - Removal broadcast: `say$ System: [name] has been removed due to inactivity`
-  - Ping tracking list prevents duplicate pings to the same client
-  - Note: We used a linked list for tracking pinged clients rather than a min-heap, as it was simpler to implement while still meeting the requirements
-
-### Extra Features
-
-1. **Error Handling with Command Prefixes**: Server sends error messages with `Error$` prefix for consistent parsing
-2. **Request Validation**: Client-side validation of request format before sending to server
-3. **Thread-Safe Operations**: All shared data structures protected with appropriate locks (read-write locks for client list, mutexes for history and ping tracking)
-4. **Graceful Cleanup**: Proper cleanup of muted lists, ping trackers, and client nodes on disconnect
-5. **Dynamic Port Allocation**: Client uses OS-assigned port (port 0) instead of hardcoded port
-6. **Input Sanitisation**: Trimming of whitespace from user input and server responses
+- A server monitor thread runs every 30 seconds.
+- Users inactive for more than 5 minutes receive a `ping$`.
+- If they don’t respond with `ret-ping$` within 10 seconds, they are removed.
+- Required careful lock ordering to prevent race conditions.
 
 ---
-## System Design Choices
+
+## Further Extensions we are proud of
 
 ### Command Prefix System for Server Responses
 
@@ -150,7 +150,6 @@ We think this makes the code more secure and easier to maintain.
 - **Mute Lists**: Linked list of `muted_node_t` structures (each client has their own)
 - **Chat History**: Circular buffer array (holds 15 messages)
 - **Ping Tracking**: Linked list of `ping_tracker_t` structures
-
 ---
 
 ## Compilation and Execution
@@ -180,7 +179,7 @@ gcc chat_client.c -o chat_client
    ```
 
 ### Admin Client
-To run a client with admin privileges (so you can use `kick$`), you need to modify the client to bind to port 6666.
+To run a client with admin privileges (so you can use `kick$`), modify the client to bind to port 6666.
 
 ---
 ## Notes

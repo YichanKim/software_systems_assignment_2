@@ -13,59 +13,51 @@
 
 ## Overview
 
-This project implements a multithreaded UDP-based chat application as specified in Assignment 2. The server uses a listener thread to receive incoming requests and spawns worker threads to handle each client request. Each client has two threads: a sender thread for reading user input and a listener thread for receiving server responses.
+This project implements a multithreaded UDP-based chat application as specified in Assignment 2. The server uses a listener thread to receive incoming requests and spawns worker threads to handle each client request. Each client has a sender thread for reading user input and a listener thread for receiving server responses.
 
 ---
 
 ## Implemented Features
 
-### Core Features (Fully Implemented)
-
 #### 1. **Connection Management**
-- **`conn$` Command**: Clients can connect to the server with a unique name
-  - Server validates name uniqueness and length
-  - Admin detection based on port 6666
-  - Sends connection confirmation with command prefix: `conn$ Hi [name], you have successfully connected to the chat`
-  - Automatically sends chat history to newly connected clients (see Proposed Extensions)
+- **`conn$` Command**: Connection to server by client
+  - Server validates name (uniqueness, length)
+  - Admin detection based on port number
+  - Sends connection confirmation with command prefix: `conn$ Hi [NAME], you have successfully connected to the chat`
+  - Sends chat history on client connection
 
 #### 2. **Message Broadcasting**
-- **`say$` Command**: Broadcast messages to all connected clients
+- **`say$` Command**: Broadcast messages to all clients
   - Messages formatted as: `say$ [sender_name]: [message]`
-  - Respects mute settings (messages not sent to clients who muted the sender)
-  - Updates sender's activity time
-  - Adds messages to chat history
+  - Respects mute settings
+  - Updates sender's activity time and adds messages to chat history
 
 #### 3. **Private Messaging**
-- **`sayto$` Command**: Send private messages to specific clients
+- **`sayto$` Command**: Send private messages to a client
   - Format: `sayto$ [recipient_name] [message]`
   - Validates recipient existence
-  - Sends message to both recipient and sender (for confirmation)
-  - Messages formatted as: `sayto$ [sender_name]: [message]`
+  - Sends message to both recipient and sender
 
 #### 4. **Disconnection**
-- **`disconn$` Command**: Gracefully disconnect from server
+- **`disconn$` Command**: Disconnect from server
   - Removes client from server's client list
-  - Cleans up muted lists
   - Sends confirmation: `disconn$ Disconnected. Bye!`
   - Client terminates cleanly upon receiving confirmation
 
 #### 5. **Mute/Unmute Functionality**
 - **`mute$` Command**: Mute a specific client
   - Per-client mute lists (linked list implementation)
-  - No server response (silent operation)
-  - Effect seen in future broadcasts (muted clients' messages not received)
+  - Effect seen in future broadcasts
   
 - **`unmute$` Command**: Unmute a previously muted client
   - Removes client from mute list
-  - No server response (silent operation)
   - Effect seen in future broadcasts
 
 #### 6. **Name Management**
 - **`rename$` Command**: Change client's chat name
   - Validates new name uniqueness
-  - Updates name in client list (thread-safe)
-  - Sends confirmation: `rename$ You are now known as [new_name]`
-  - Client updates local name upon confirmation
+  - Updates name in client list
+  - Client updates local name upon server confirmation
 
 #### 7. **Admin Functionality**
 - **`kick$` Command**: Admin-only command to forcibly remove clients
@@ -78,8 +70,7 @@ This project implements a multithreaded UDP-based chat application as specified 
 ### User Interface (Fully Implemented)
 
 - **Two-Terminal Approach**: We implemented the alternative file-based UI option from the assignment
-  - Client writes incoming messages to `iChat_<PID>.txt` file (using process ID to make filenames unique)
-  - Users can view messages in real-time using `tail -f iChat_<PID>.txt` in a separate terminal
+  - Client writes incoming messages to `iChat_<PID>.txt` file (using process ID to make filenames unique). Users can view messages in real-time using `tail -f iChat_<PID>.txt` in a separate terminal
   - Input handled in main terminal, output written to file
   - File automatically flushed after each write for real-time updates
 
@@ -89,9 +80,7 @@ This project implements a multithreaded UDP-based chat application as specified 
 - **Implementation Details**:
   - Circular buffer data structure storing last 15 broadcast messages
   - Thread-safe with mutex protection
-  - Messages stored with `history$` prefix: `history$ [sender_name]: [message]`
   - Automatically sent to newly connected clients after connection confirmation
-  - Buffer wraps around when full (FIFO behaviour)
 
 #### PE2: Remove Inactive Clients
 - **Implementation Details**:
@@ -148,21 +137,6 @@ One design choice we made was to use command prefixes in server responses, paire
 
 We think this makes the code more secure and easier to maintain.
 
----
-
-## Technical Implementation Details
-
-### Server Architecture
-- **Multithreaded Design**: 
-  - Listener thread: Continuously waits for incoming UDP packets from clients
-  - Request-servicing threads (worker threads): Each thread handles one incoming client request (detached threads)
-  - Monitor thread: Checks for inactive clients and handles the ping/ret-ping mechanism (for PE2)
-
-### Client Architecture
-- **Multithreaded Design**:
-  - Sender thread: Reads user input from stdin and sends requests to the server
-  - Listener thread: Receives server responses and writes them to file (displays them)
-
 ### Synchronisation
 - **Client List**: Uses `pthread_rwlock_t` (reader-writer lock) as required by the assignment
   - Read locks (`pthread_rwlock_rdlock`) for reader threads (broadcasting, looking up clients, reading muted lists)
@@ -209,22 +183,6 @@ gcc chat_client.c -o chat_client
 To run a client with admin privileges (so you can use `kick$`), you need to modify the client to bind to port 6666.
 
 ---
-
-## Usage Examples
-
-### Basic Chat Flow
-1. Connect: `conn$ Alice`
-2. Send broadcast: `say$ Hello everyone!`
-3. Send private message: `sayto$ Bob Hi there!`
-4. Mute a user: `mute$ Bob`
-5. Rename: `rename$ AliceNew`
-6. Disconnect: `disconn$`
-
-### Admin Commands
-1. Connect as admin (port 6666): `conn$ Admin`
-2. Kick a user: `kick$ Bob`
-
----
 ## Notes
 
 - The server runs on port 12000 (defined in `udp.h` as `SERVER_PORT`)
@@ -240,25 +198,6 @@ To run a client with admin privileges (so you can use `kick$`), you need to modi
 
 ## Limitations and Future Improvements
 
-1. **Error Handling**: We could handle some error cases better, like network failures or socket errors.
+1. **Admin Port**: Right now admin functionality needs you to manually bind to port 6666. It would be better to add command-line arguments for this.
 
-2. **Message Size**: We don't explicitly handle messages that are too big, though `strncpy` prevents buffer overflow.
-
-3. **Admin Port**: Right now admin functionality needs you to manually bind to port 6666. It would be better to add command-line arguments for this.
-
-4. **File Cleanup**: The chat files (`iChat_<PID>.txt`) don't get cleaned up automatically when the client exits.
-
----
-
-## Testing
-
-We tested the implementation for:
-- Multiple clients running at the same time
-- Connecting and disconnecting
-- Broadcasting messages and private messages
-- Mute/unmute working correctly
-- Rename functionality
-- Admin kick functionality
-- Chat history being sent to new clients
-- Inactive clients being removed (ping/ret-ping mechanism)
-- Thread safety when multiple things happen at once
+2. **File Cleanup**: The chat files (`iChat_<PID>.txt`) don't get cleaned up automatically when the client exits.

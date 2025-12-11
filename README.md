@@ -24,7 +24,7 @@ For this assignment we built a UDP-based chat system using multi-threading on bo
 
 ---
 
-##Implemenntation
+## Implemenntation
 
 ### Connecting
 

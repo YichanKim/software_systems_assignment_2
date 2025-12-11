@@ -7,7 +7,7 @@
 #include <unistd.h> //for getpid
 
 #define CLIENT_PORT 10000
-#define MAX_NAME_LEN 256
+#define MAX_NAME_LEN 10
 
 //Make sure name cannot have '$'
 
